@@ -1,0 +1,7 @@
+/scrivi
+/scrivi.exe
+/build/
+/dist/
+*.pfx
+*.p12
+*.key

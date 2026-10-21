@@ -1,0 +1,111 @@
+name: Windows build and release
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Enable MinGW compiler
+        shell: pwsh
+        run: |
+          $compiler = 'C:\msys64\mingw64\bin'
+          if (!(Test-Path "$compiler\gcc.exe")) {
+            throw 'MinGW GCC is missing from the runner.'
+          }
+          $compiler >> $env:GITHUB_PATH
+          'CGO_ENABLED=1' >> $env:GITHUB_ENV
+          'CC=gcc' >> $env:GITHUB_ENV
+      - name: Check and build Windows executable
+        shell: pwsh
+        env:
+          BUILD_REF: ${{ github.ref }}
+          BUILD_REPOSITORY: ${{ github.repository }}
+        run: |
+          $version = 'dev'
+          if ($env:BUILD_REF.StartsWith('refs/tags/')) {
+            $version = $env:BUILD_REF.Substring(10)
+            if ($version -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+              throw 'Use a stable vMAJOR.MINOR.PATCH release tag.'
+            }
+          }
+          go test -tags ci ./...
+          if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
+          go vet ./...
+          if ($LASTEXITCODE -ne 0) { throw 'Vet failed.' }
+          go build -trimpath -ldflags "-s -w -H=windowsgui -extldflags=-static -X main.appVersion=$version -X main.releaseRepository=$env:BUILD_REPOSITORY" -o build/scrivi.exe .
+          if ($LASTEXITCODE -ne 0) { throw 'Windows build failed.' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: build/scrivi.exe
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    concurrency:
+      group: windows-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x64
+          path: build
+      - name: Check public update hosting
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          $repository = gh repo view $env:RELEASE_REPOSITORY --json isPrivate | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Could not check release hosting.' }
+          if ($repository.isPrivate) {
+            throw 'Update checks require publicly accessible releases. Use a public repository.'
+          }
+      - name: Package unsigned installer
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          ./packaging/windows/package.ps1 `
+            -Version $env:RELEASE_TAG `
+            -ExecutablePath build/scrivi.exe
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          $releases = gh release list --repo $env:RELEASE_REPOSITORY --exclude-drafts --exclude-pre-releases --limit 1 --json tagName
+          if ($LASTEXITCODE -ne 0) { throw 'Could not check the existing release.' }
+          $latest = @($releases | ConvertFrom-Json)
+          $version = [version]($env:RELEASE_TAG -replace '^v', '')
+          if ($latest.Count -gt 0) {
+            $previous = [version]($latest[0].tagName -replace '^v', '')
+            if ($version -le $previous) {
+              throw 'Release versions must increase. Do not republish an existing version.'
+            }
+          }
+          gh release create $env:RELEASE_TAG dist/* `
+            --repo $env:RELEASE_REPOSITORY --verify-tag --latest `
+            --title "scrivi $env:RELEASE_TAG" --generate-notes
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed.' }

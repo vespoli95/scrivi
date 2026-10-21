@@ -30,6 +30,7 @@ func main() {
 	}()
 	w.SetContent(todoUI(w, db))
 	w.Resize(fyne.NewSize(480, 540))
+	checkForUpdates(a, w)
 	w.ShowAndRun()
 }
 
