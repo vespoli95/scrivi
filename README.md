@@ -48,16 +48,20 @@ go test -tags ci ./...
 
 ## Windows installation and automatic updates
 
-The Windows workflow builds an x64 executable on pull requests and pushes to
-`main`. Pushing a stable version tag also creates an **unsigned Inno Setup
-installer** and publishes it on GitHub Releases. No signing certificate, PFX,
+The Windows workflow builds an x64 executable on pull requests. Each successful
+push build on `main` also creates an **unsigned Inno Setup installer** and
+publishes a new GitHub Release, automatically incrementing the patch version
+(starting at `v1.0.0` if there are no releases). No signing certificate, PFX,
 certificate password, or Azure account is required.
 
-Release builds automatically check GitHub for a newer version at startup on
-Windows. If one is available, scrivi offers to open its installer download in
-your browser. Close scrivi and run the downloaded installer to upgrade.
-Detection is automatic; installation requires your confirmation and is not
-silent or unattended. Development builds (`dev`) skip update checks.
+Release builds check GitHub at startup and every five minutes while running on
+Windows. When a newer version is available, one confirmation downloads the
+installer, verifies its SHA-256 checksum, and starts the upgrade. Scrivi then
+closes and the installer relaunches it when installation finishes. Todos are
+preserved. The installer shows progress and may show Windows security prompts;
+updates are not installed without your confirmation. Declining a version
+suppresses further prompts for that version until the app is reopened.
+Development builds (`dev`) skip update checks.
 
 ### One-time release setup
 
@@ -71,22 +75,31 @@ and HTTPS, not a verified Windows publisher.
 
 ### Publish an update
 
-Commit and push the application and workflow first, then push a new version tag:
+Commit and push to `main`. Once the Windows build succeeds, GitHub Actions
+publishes an installer, its `.exe.sha256` checksum, and a version tag pointing at
+that commit. There is no need to create a tag for routine updates. Pushes made
+while a release workflow is running may be coalesced into the newest pending
+push; the newest build includes the preceding changes.
+
+To choose a specific version (for example, a major or minor release), push a
+stable version tag instead:
 
 ```sh
-git tag v1.0.0
-git push origin v1.0.0
+git tag v2.0.0
+git push origin v2.0.0
 ```
 
-Use increasing `vMAJOR.MINOR.PATCH` versions, for example `v1.0.0`. Each component
-must be at most 65535. Prerelease suffixes are not supported by this stable
-release workflow.
-Do not move or reuse published tags. For the next update, use `v1.0.1`.
+Use an unused `vMAJOR.MINOR.PATCH` version higher than the latest release. Each
+component must be at most 65535. Prerelease suffixes are not supported by this
+stable release workflow.
+Do not move or reuse published tags. Automatic updates increment the patch
+component, carrying into the minor and major components if necessary.
 Keep the latest GitHub Release pointed at the highest stable Windows version.
 
 The release job compiles the installer with Inno Setup 6 on the Windows runner
-and refuses to publish a version that does not increase. The build job also
-exposes the executable as a workflow artifact for development.
+and refuses to publish a version that does not increase. Release workflows are
+serialized so concurrent builds do not choose the same automatic version. The
+build job also exposes the executable as a workflow artifact for development.
 
 ### Install on Windows
 
@@ -113,12 +126,20 @@ alone. If migrating from an MSIX installation, back up and manually migrate its
 potentially virtualized database before uninstalling that package.
 Offline use is supported; failed update checks are logged and do not block the
 app. Checks use GitHub's unauthenticated API, so rate limits may delay detection.
+Verified installers are cached at `%LocalAppData%\scrivi\updates\setup.exe`;
+failed or incomplete downloads are discarded. Checksums detect damaged downloads,
+not a compromised publisher: installers remain unsigned.
+
+Existing installations with the older browser-only updater need to install
+the first release containing this updater once. Later updates use the in-app
+download and restart flow.
 
 ### Windows release acceptance check
 
 Before distributing publicly, install `v1.0.0` using the setup executable on a
 clean Windows PC. Check shortcuts, add and complete todos, and close and reopen
-scrivi. Publish `v1.0.1`, reopen the installed app, accept its update notification,
-and run the downloaded setup. Confirm your todos survive and the notification
-does not reappear on the latest version. Check offline launch and uninstall too.
+scrivi. Push a change to `main`, keep the app open, and accept its update
+notification after the new release is published. Confirm the installer runs,
+scrivi restarts, your todos survive, and the notification does not reappear on
+the latest version. Check offline launch and uninstall too.
 This Windows installation/update check cannot be replaced by headless Go tests.

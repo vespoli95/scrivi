@@ -31,3 +31,10 @@ Name: "{autodesktop}\scrivi"; Filename: "{app}\scrivi.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\scrivi.exe"; Description: "Launch scrivi"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\scrivi.exe"; Flags: nowait skipifnotsilent; Check: RestartScrivi
+
+[Code]
+function RestartScrivi: Boolean;
+begin
+  Result := ExpandConstant('{param:RESTARTSCRIVI|0}') = '1';
+end;

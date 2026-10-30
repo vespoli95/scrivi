@@ -24,3 +24,6 @@ $output = (Resolve-Path -LiteralPath $output).Path
 & $compiler "/DAppVersion=$($Version.Substring(1))" "/DExecutablePath=$executable" `
     "/DOutputPath=$output" (Join-Path $PSScriptRoot 'scrivi.iss')
 if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
+$installer = Join-Path $output "scrivi-$Version-windows-x64-setup.exe"
+$checksum = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+Set-Content -LiteralPath "$installer.sha256" -Value $checksum -Encoding ascii

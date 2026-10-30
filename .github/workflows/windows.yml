@@ -9,8 +9,62 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: windows-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: false
+
 jobs:
+  version:
+    runs-on: windows-2022
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Choose release version
+        id: version
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_REF: ${{ github.ref }}
+          BUILD_EVENT: ${{ github.event_name }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          $version = 'dev'
+          if ($env:BUILD_EVENT -eq 'push') {
+            if ($env:BUILD_REF.StartsWith('refs/tags/')) {
+              $version = $env:BUILD_REF.Substring(10)
+            } else {
+              $releases = gh release list --repo $env:RELEASE_REPOSITORY --exclude-drafts --exclude-pre-releases --limit 1 --json tagName
+              if ($LASTEXITCODE -ne 0) { throw 'Could not check the existing release.' }
+              $latest = @($releases | ConvertFrom-Json)
+              $version = 'v1.0.0'
+              if ($latest.Count -gt 0) {
+                $tag = $latest[0].tagName
+                if ($tag -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+                  throw 'The latest release must use a stable vMAJOR.MINOR.PATCH version.'
+                }
+                $previous = [version]$tag.Substring(1)
+                $major, $minor, $patch = $previous.Major, $previous.Minor, $previous.Build
+                if ($major -gt 65535 -or $minor -gt 65535 -or $patch -gt 65535) {
+                  throw 'Version components must be at most 65535.'
+                }
+                $patch++
+                if ($patch -gt 65535) { $patch = 0; $minor++ }
+                if ($minor -gt 65535) { $minor = 0; $major++ }
+                $version = "v$major.$minor.$patch"
+              }
+            }
+            if ($version -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+              throw 'Use a stable vMAJOR.MINOR.PATCH release tag.'
+            }
+            $parsed = [version]$version.Substring(1)
+            if ($parsed.Major -gt 65535 -or $parsed.Minor -gt 65535 -or $parsed.Build -gt 65535) {
+              throw 'Version components must be at most 65535.'
+            }
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
   build:
+    needs: version
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
@@ -34,21 +88,14 @@ jobs:
       - name: Check and build Windows executable
         shell: pwsh
         env:
-          BUILD_REF: ${{ github.ref }}
+          BUILD_VERSION: ${{ needs.version.outputs.version }}
           BUILD_REPOSITORY: ${{ github.repository }}
         run: |
-          $version = 'dev'
-          if ($env:BUILD_REF.StartsWith('refs/tags/')) {
-            $version = $env:BUILD_REF.Substring(10)
-            if ($version -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
-              throw 'Use a stable vMAJOR.MINOR.PATCH release tag.'
-            }
-          }
           go test -tags ci ./...
           if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
           go vet ./...
           if ($LASTEXITCODE -ne 0) { throw 'Vet failed.' }
-          go build -trimpath -ldflags "-s -w -H=windowsgui -extldflags=-static -X main.appVersion=$version -X main.releaseRepository=$env:BUILD_REPOSITORY" -o build/scrivi.exe .
+          go build -trimpath -ldflags "-s -w -H=windowsgui -extldflags=-static -X main.appVersion=$env:BUILD_VERSION -X main.releaseRepository=$env:BUILD_REPOSITORY" -o build/scrivi.exe .
           if ($LASTEXITCODE -ne 0) { throw 'Windows build failed.' }
       - uses: actions/upload-artifact@v4
         with:
@@ -57,14 +104,11 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    if: github.event_name == 'push'
+    needs: [version, build]
     runs-on: windows-2022
     permissions:
       contents: write
-    concurrency:
-      group: windows-release
-      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -85,7 +129,7 @@ jobs:
       - name: Package unsigned installer
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.version.outputs.version }}
           RELEASE_REPOSITORY: ${{ github.repository }}
         run: |
           ./packaging/windows/package.ps1 `
@@ -95,8 +139,10 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.version.outputs.version }}
           RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          BUILD_REF: ${{ github.ref }}
         run: |
           $releases = gh release list --repo $env:RELEASE_REPOSITORY --exclude-drafts --exclude-pre-releases --limit 1 --json tagName
           if ($LASTEXITCODE -ne 0) { throw 'Could not check the existing release.' }
@@ -108,7 +154,9 @@ jobs:
               throw 'Release versions must increase. Do not republish an existing version.'
             }
           }
-          gh release create $env:RELEASE_TAG dist/* `
-            --repo $env:RELEASE_REPOSITORY --verify-tag --latest `
+          $tagOptions = @('--target', $env:RELEASE_COMMIT)
+          if ($env:BUILD_REF.StartsWith('refs/tags/')) { $tagOptions = @('--verify-tag') }
+          gh release create $env:RELEASE_TAG dist/* @tagOptions `
+            --repo $env:RELEASE_REPOSITORY --latest `
             --title "scrivi $env:RELEASE_TAG" --generate-notes
           if ($LASTEXITCODE -ne 0) { throw 'Release publication failed.' }
