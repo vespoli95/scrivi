@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"fmt"
 	"log"
 	"os"
@@ -10,9 +11,15 @@ import (
 	"fyne.io/fyne/v2/app"
 )
 
+//go:embed assets/icon.svg
+var appIconData []byte
+
 func main() {
 	a := app.New()
+	icon := fyne.NewStaticResource("scrivi.svg", appIconData)
+	a.SetIcon(icon)
 	w := a.NewWindow("Scrivi")
+	w.SetIcon(icon)
 	db, err := openDefaultDB()
 	if err != nil {
 		log.Print(err)

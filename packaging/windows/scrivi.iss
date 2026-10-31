@@ -14,7 +14,7 @@ OutputBaseFilename=scrivi-v{#AppVersion}-windows-x64-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-UninstallDisplayIcon={app}\scrivi.exe
+UninstallDisplayIcon={app}\scrivi.ico
 CloseApplications=yes
 RestartApplications=no
 SetupLogging=yes
@@ -24,10 +24,11 @@ Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [Files]
 Source: "{#ExecutablePath}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#IconPath}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\scrivi"; Filename: "{app}\scrivi.exe"
-Name: "{autodesktop}\scrivi"; Filename: "{app}\scrivi.exe"; Tasks: desktopicon
+Name: "{group}\scrivi"; Filename: "{app}\scrivi.exe"; IconFilename: "{app}\scrivi.ico"
+Name: "{autodesktop}\scrivi"; Filename: "{app}\scrivi.exe"; IconFilename: "{app}\scrivi.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\scrivi.exe"; Description: "Launch scrivi"; Flags: nowait postinstall skipifsilent

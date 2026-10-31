@@ -18,11 +18,12 @@ foreach ($part in @($parsed.Major, $parsed.Minor, $parsed.Build)) {
 $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
 if (!(Test-Path -LiteralPath $compiler)) { throw 'Install Inno Setup 6 before packaging.' }
 $executable = (Resolve-Path -LiteralPath $ExecutablePath).Path
+$icon = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../../assets/icon.ico')).Path
 $output = Join-Path $PSScriptRoot '../../dist'
 New-Item -ItemType Directory -Path $output -Force | Out-Null
 $output = (Resolve-Path -LiteralPath $output).Path
 & $compiler "/DAppVersion=$($Version.Substring(1))" "/DExecutablePath=$executable" `
-    "/DOutputPath=$output" (Join-Path $PSScriptRoot 'scrivi.iss')
+    "/DIconPath=$icon" "/DOutputPath=$output" (Join-Path $PSScriptRoot 'scrivi.iss')
 if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
 $installer = Join-Path $output "scrivi-$Version-windows-x64-setup.exe"
 $checksum = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
