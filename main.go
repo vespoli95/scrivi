@@ -8,7 +8,6 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
-	"fyne.io/fyne/v2/dialog"
 )
 
 func main() {
@@ -17,7 +16,7 @@ func main() {
 	db, err := openDefaultDB()
 	if err != nil {
 		log.Print(err)
-		message := dialog.NewError(err, w)
+		message := newErrorDialog(err, w)
 		message.SetOnClosed(w.Close)
 		message.Show()
 		w.ShowAndRun()

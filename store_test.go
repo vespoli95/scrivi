@@ -93,6 +93,91 @@ func TestInvalidCategoryOperations(t *testing.T) {
 	}
 }
 
+func TestCategoryIconsPersistAndPreserveCacheOnFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "todos.sqlite")
+	db, err := openMemoryDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.close()
+	if err := db.addCategoryWithIcon("Life", "🏠"); err != nil {
+		t.Fatal(err)
+	}
+	id := db.listCategories()[1].ID
+	checkPersisted := func(icon string) {
+		t.Helper()
+		reopened, err := openMemoryDB(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer reopened.close()
+		if reopened.categories[id].Icon != icon || db.categories[id].Icon != icon {
+			t.Fatalf("category icon was not durable: want %q", icon)
+		}
+	}
+	checkPersisted("🏠")
+	if err := db.setCategoryIcon(id, "⭐"); err != nil {
+		t.Fatal(err)
+	}
+	checkPersisted("⭐")
+	if err := db.setCategoryIcon(42, "⭐"); !errors.Is(err, errCategoryNotFound) {
+		t.Fatalf("unexpected missing category error: %v", err)
+	}
+	if err := db.setCategoryIcon(id, "not an emoji"); err == nil {
+		t.Fatal("accepted an invalid category icon")
+	}
+	if err := db.addCategoryWithIcon("Invalid", "not an emoji"); err == nil {
+		t.Fatal("created a category with an invalid icon")
+	}
+	if _, err := db.disk.Exec(`CREATE TRIGGER prevent_icon_update BEFORE UPDATE OF icon ON categories
+		BEGIN SELECT RAISE(ABORT, 'update blocked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.setCategoryIcon(id, "💼"); err == nil {
+		t.Fatal("expected category icon write error")
+	}
+	checkPersisted("⭐")
+	if _, err := db.disk.Exec("DROP TRIGGER prevent_icon_update"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.setCategoryIcon(id, ""); err != nil {
+		t.Fatal(err)
+	}
+	checkPersisted("")
+}
+
+func TestExistingCategoriesMigrateWithoutLosingData(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "todos.sqlite")
+	legacy, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`PRAGMA foreign_keys = ON;
+		CREATE TABLE categories (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL COLLATE NOCASE UNIQUE);
+		CREATE TABLE todos (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+			done INTEGER NOT NULL DEFAULT 0, category_id INTEGER REFERENCES categories(id));
+		INSERT INTO categories (id, name) VALUES (1, 'Work');
+		INSERT INTO todos (title, done, category_id) VALUES ('Keep', 1, 1)`); err != nil {
+		legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMemoryDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.close()
+	if db.categories[1] != (category{ID: 1, Name: "Work"}) ||
+		!reflect.DeepEqual(db.list(), []todo{{ID: 1, Title: "Keep", Done: true, CategoryID: 1}}) {
+		t.Fatal("icon migration changed existing categories or todos")
+	}
+	if err := db.setCategoryIcon(1, "💼"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCategoryDeletionRollsBackOnFailure(t *testing.T) {
 	db := newTestDB(t)
 	if err := db.addCategory("Work"); err != nil {

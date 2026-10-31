@@ -227,7 +227,7 @@ func offerUpdate(ctx context.Context, a fyne.App, w fyne.Window, version, downlo
 		if ctx.Err() != nil {
 			return
 		}
-		dialog.ShowConfirm("Update available",
+		showConfirm("Update available",
 			fmt.Sprintf("scrivi %s is available (installed: %s).\nDownload and run the unsigned installer now?\nScrivi will restart. Your todos will be kept.", version, appVersion),
 			func(ok bool) { accepted <- ok }, w)
 	})
@@ -252,7 +252,7 @@ func offerUpdate(ctx context.Context, a fyne.App, w fyne.Window, version, downlo
 			return
 		}
 		if err != nil {
-			dialog.ShowError(err, w)
+			showError(err, w)
 			return
 		}
 		a.Quit()

@@ -25,6 +25,7 @@ type todo struct {
 type category struct {
 	ID   int
 	Name string
+	Icon string
 }
 
 // memoryDB belongs to the UI goroutine. SQLite writes succeed before the cache changes.
@@ -51,7 +52,8 @@ func (db *memoryDB) load() error {
 	if _, err := db.disk.Exec(`PRAGMA foreign_keys = ON;
 		CREATE TABLE IF NOT EXISTS categories (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			name TEXT NOT NULL COLLATE NOCASE UNIQUE
+			name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+			icon TEXT NOT NULL DEFAULT ''
 		)`); err != nil {
 		return fmt.Errorf("initialize category database: %w", err)
 	}
@@ -64,6 +66,9 @@ func (db *memoryDB) load() error {
 		return fmt.Errorf("initialize todo database: %w", err)
 	}
 	if err := db.migrateCategories(); err != nil {
+		return err
+	}
+	if err := db.migrateCategoryIcons(); err != nil {
 		return err
 	}
 	if err := db.loadCategories(); err != nil {
@@ -114,14 +119,14 @@ func (db *memoryDB) migrateCategories() error {
 }
 
 func (db *memoryDB) loadCategories() error {
-	rows, err := db.disk.Query("SELECT id, name FROM categories")
+	rows, err := db.disk.Query("SELECT id, name, icon FROM categories")
 	if err != nil {
 		return fmt.Errorf("load categories: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var item category
-		if err := rows.Scan(&item.ID, &item.Name); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Icon); err != nil {
 			return fmt.Errorf("read category: %w", err)
 		}
 		db.categories[item.ID] = item
@@ -165,6 +170,13 @@ func (db *memoryDB) addInCategory(title string, categoryID int) error {
 }
 
 func (db *memoryDB) addCategory(name string) error {
+	return db.addCategoryWithIcon(name, "")
+}
+
+func (db *memoryDB) addCategoryWithIcon(name, icon string) error {
+	if !validCategoryIcon(icon) {
+		return errors.New("choose a category emoji from the picker")
+	}
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return errors.New("enter a category name first")
@@ -174,7 +186,7 @@ func (db *memoryDB) addCategory(name string) error {
 			return errors.New("a category with that name already exists")
 		}
 	}
-	result, err := db.disk.Exec("INSERT INTO categories (name) VALUES (?)", name)
+	result, err := db.disk.Exec("INSERT INTO categories (name, icon) VALUES (?, ?)", name, icon)
 	if err != nil {
 		return fmt.Errorf("save category: %w", err)
 	}
@@ -182,8 +194,70 @@ func (db *memoryDB) addCategory(name string) error {
 	if err != nil {
 		return fmt.Errorf("get saved category ID: %w", err)
 	}
-	db.categories[int(id)] = category{ID: int(id), Name: name}
+	db.categories[int(id)] = category{ID: int(id), Name: name, Icon: icon}
 	return nil
+}
+
+func (db *memoryDB) migrateCategoryIcons() error {
+	rows, err := db.disk.Query("PRAGMA table_info(categories)")
+	if err != nil {
+		return fmt.Errorf("inspect category schema: %w", err)
+	}
+	hasIcon := false
+	for rows.Next() {
+		var id, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&id, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return errors.Join(fmt.Errorf("read category schema: %w", err), rows.Close())
+		}
+		hasIcon = hasIcon || name == "icon"
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return fmt.Errorf("inspect category schema: %w", err)
+	}
+	if !hasIcon {
+		if _, err := db.disk.Exec("ALTER TABLE categories ADD COLUMN icon TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("migrate category icons: %w", err)
+		}
+	}
+	return nil
+}
+
+func (db *memoryDB) setCategoryIcon(id int, icon string) error {
+	item, ok := db.categories[id]
+	if !ok {
+		return errCategoryNotFound
+	}
+
+	if !validCategoryIcon(icon) {
+		return errors.New("choose a category emoji from the picker")
+	}
+	if _, err := db.disk.Exec("UPDATE categories SET icon = ? WHERE id = ?", icon, id); err != nil {
+		return fmt.Errorf("save category icon: %w", err)
+	}
+	item.Icon = icon
+	db.categories[id] = item
+	return nil
+}
+
+var categoryEmojis = []string{
+	"🏠", "💼", "💰", "📚", "🛒", "🎯",
+	"❤️", "💪", "🍽️", "✈️", "🎨", "🎵",
+	"🌱", "🐾", "💻", "🔧", "📅", "⭐",
+	"🎮", "🚗", "🏖️", "🎁", "☕", "📝",
+}
+
+func validCategoryIcon(icon string) bool {
+	if icon == "" {
+		return true
+	}
+	for _, emoji := range categoryEmojis {
+		if icon == emoji {
+			return true
+		}
+	}
+	return false
 }
 
 func (db *memoryDB) listCategories() []category {
