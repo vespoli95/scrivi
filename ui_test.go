@@ -120,8 +120,8 @@ func TestCategoryUI(t *testing.T) {
 	frame := findUIObject(t, content, func(rectangle *canvas.Rectangle) bool {
 		return rectangle.StrokeColor == color.White && rectangle.StrokeWidth > 0
 	})
-	if frame.Size().Width != 340 || frame.Size().Height != 320 {
-		t.Fatal("white border does not enclose the category panel")
+	if frame.Size().Width != 340 || frame.Size().Height <= 240 || frame.Size().Height != uncategorized.Size().Height+2*theme.Padding() {
+		t.Fatal("category panel does not stretch to fill the available window height")
 	}
 	findTodoEntry(life).SetText("Another draft")
 	test.Tap(findButton(life, "Icon"))
@@ -230,9 +230,15 @@ func TestCategoryRowsAreCentered(t *testing.T) {
 			start = end + 1
 		}
 		last := objects[len(objects)-1]
-		if layout.MinSize(objects).Height != last.Position().Y+last.Size().Height {
+		if last.Size().Height < 320 || max(float32(600), layout.MinSize(objects).Height) < last.Position().Y+last.Size().Height {
 			t.Fatal("scrollable height does not include every row")
 		}
+	}
+	objects := []fyne.CanvasObject{canvas.NewRectangle(nil)}
+	layout := &centeredCategoryLayout{cellSize: fyne.NewSize(340, 320)}
+	layout.Layout(objects, fyne.NewSize(760, 600))
+	if objects[0].Size().Height != 600 {
+		t.Fatal("category panel did not stretch to fill the available window height")
 	}
 }
 

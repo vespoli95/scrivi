@@ -197,12 +197,14 @@ func showCategoryEmojiPicker(w fyne.Window, selected string, onSelected func(str
 type centeredCategoryLayout struct {
 	cellSize fyne.Size
 	rows     int
+	columns  int
 }
 
 func (l *centeredCategoryLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 	padding := theme.Padding()
 	width := min(l.cellSize.Width, size.Width)
 	columns := max(1, int(math.Floor(float64((size.Width+padding)/(width+padding)))))
+	l.columns = columns
 	var visible []fyne.CanvasObject
 	for _, object := range objects {
 		if object.Visible() {
@@ -210,20 +212,32 @@ func (l *centeredCategoryLayout) Layout(objects []fyne.CanvasObject, size fyne.S
 		}
 	}
 	l.rows = (len(visible) + columns - 1) / columns
+	cellHeight := l.cellSize.Height
+	if l.rows > 0 {
+		cellHeight = max(cellHeight, (size.Height-float32(l.rows-1)*padding)/float32(l.rows))
+	}
 	for start := 0; start < len(visible); start += columns {
 		count := min(columns, len(visible)-start)
 		rowWidth := float32(count)*width + float32(count-1)*padding
 		for column := 0; column < count; column++ {
 			object := visible[start+column]
 			object.Move(fyne.NewPos((size.Width-rowWidth)/2+float32(column)*(width+padding),
-				float32(start/columns)*(l.cellSize.Height+padding)))
-			object.Resize(fyne.NewSize(width, l.cellSize.Height))
+				float32(start/columns)*(cellHeight+padding)))
+			object.Resize(fyne.NewSize(width, cellHeight))
 		}
 	}
 }
 
-func (l *centeredCategoryLayout) MinSize([]fyne.CanvasObject) fyne.Size {
-	rows := max(1, l.rows)
+func (l *centeredCategoryLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	columns := max(1, l.columns)
+	count := 0
+	for _, object := range objects {
+		if object.Visible() {
+			count++
+		}
+	}
+	rows := max(1, (count+columns-1)/columns)
+	l.rows = rows
 	return fyne.NewSize(l.cellSize.Width,
 		float32(rows)*l.cellSize.Height+float32(rows-1)*theme.Padding())
 }
@@ -343,7 +357,7 @@ func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete 
 func todoUI(w fyne.Window, db *memoryDB) fyne.CanvasObject {
 	entry := widget.NewEntry()
 	entry.SetPlaceHolder("Category name (Life, Money, Work...)")
-	panels := container.New(&centeredCategoryLayout{cellSize: fyne.NewSize(340, 320)})
+	panels := container.New(&centeredCategoryLayout{cellSize: fyne.NewSize(340, 240), columns: 2})
 	categoryPanels := make(map[int]*todoCategoryPanel)
 
 	var refresh func()
