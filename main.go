@@ -29,7 +29,7 @@ func main() {
 		}
 	}()
 	w.SetContent(todoUI(w, db))
-	w.Resize(fyne.NewSize(480, 540))
+	w.Resize(fyne.NewSize(760, 600))
 	checkForUpdates(a, w)
 	w.ShowAndRun()
 }

@@ -45,11 +45,12 @@ func (l *todoTitleLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 
 	line := objects[1].(*canvas.Line)
 	line.Move(fyne.NewPos(0, size.Height/2))
-	line.Resize(fyne.NewSize(l.strikeWidth, 0))
+	line.Resize(fyne.NewSize(min(l.strikeWidth, size.Width), 0))
 }
 
 func newTodoTitle(title string, done bool, onTapped func()) fyne.CanvasObject {
 	label := widget.NewLabel(title)
+	label.Truncation = fyne.TextTruncateEllipsis
 	if !done {
 		return newTodoTitleWidget(label, onTapped)
 	}
@@ -60,7 +61,12 @@ func newTodoTitle(title string, done bool, onTapped func()) fyne.CanvasObject {
 	return newTodoTitleWidget(container.New(&todoTitleLayout{strikeWidth: width}, label, line), onTapped)
 }
 
-func todoUI(w fyne.Window, db *memoryDB) fyne.CanvasObject {
+type todoCategoryPanel struct {
+	content fyne.CanvasObject
+	refresh func()
+}
+
+func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete func()) *todoCategoryPanel {
 	entry := widget.NewEntry()
 	entry.SetPlaceHolder("What needs doing?")
 	rows := container.NewVBox()
@@ -69,7 +75,12 @@ func todoUI(w fyne.Window, db *memoryDB) fyne.CanvasObject {
 	refresh = func() {
 		rows.RemoveAll()
 		items := db.list()
+		count := 0
 		for _, item := range items {
+			if item.CategoryID != group.ID {
+				continue
+			}
+			count++
 			check := widget.NewCheck("", nil)
 			check.SetChecked(item.Done)
 			check.OnChanged = func(done bool) {
@@ -90,15 +101,15 @@ func todoUI(w fyne.Window, db *memoryDB) fyne.CanvasObject {
 				}
 				refresh()
 			})
-			rows.Add(container.NewBorder(nil, nil, nil, remove, container.NewHBox(check, title)))
+			rows.Add(container.NewBorder(nil, nil, check, remove, title))
 		}
-		if len(items) == 0 {
+		if count == 0 {
 			rows.Add(widget.NewLabel("No todos yet. Add one above."))
 		}
 	}
 
 	add := func() {
-		if err := db.add(entry.Text); err != nil {
+		if err := db.addInCategory(entry.Text, group.ID); err != nil {
 			dialog.ShowError(err, w)
 			return
 		}
@@ -109,10 +120,78 @@ func todoUI(w fyne.Window, db *memoryDB) fyne.CanvasObject {
 	entry.OnSubmitted = func(string) { add() }
 	addButton := widget.NewButtonWithIcon("Add", theme.ContentAddIcon(), add)
 	addButton.Importance = widget.HighImportance
+	var remove fyne.CanvasObject
+	if group.ID != 0 {
+		remove = widget.NewButtonWithIcon("", theme.DeleteIcon(), onDelete)
+	}
+	name := widget.NewLabelWithStyle(group.Name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	name.Truncation = fyne.TextTruncateEllipsis
+	header := container.NewVBox(
+		container.NewBorder(nil, nil, nil, remove, name),
+		widget.NewSeparator(),
+		container.NewBorder(nil, nil, nil, addButton, entry),
+	)
+	refresh()
+	return &todoCategoryPanel{
+		content: widget.NewCard("", "", container.NewBorder(header, nil, nil, nil, container.NewVScroll(rows))),
+		refresh: refresh,
+	}
+}
+
+func todoUI(w fyne.Window, db *memoryDB) fyne.CanvasObject {
+	entry := widget.NewEntry()
+	entry.SetPlaceHolder("Category name (Life, Money, Work...)")
+	panels := container.NewGridWrap(fyne.NewSize(340, 320))
+	categoryPanels := make(map[int]*todoCategoryPanel)
+
+	var refresh func()
+	refresh = func() {
+		panels.RemoveAll()
+		for id := range categoryPanels {
+			if id != 0 {
+				if _, exists := db.categories[id]; !exists {
+					delete(categoryPanels, id)
+				}
+			}
+		}
+		for _, group := range db.listCategories() {
+			panel, exists := categoryPanels[group.ID]
+			if !exists {
+				panel = newTodoCategoryPanel(w, db, group, func() {
+					dialog.ShowConfirm("Delete category?",
+						"Delete "+group.Name+"? Its todos will move to Uncategorized.", func(confirmed bool) {
+							if !confirmed {
+								return
+							}
+							if err := db.deleteCategory(group.ID); err != nil {
+								dialog.ShowError(err, w)
+								return
+							}
+							refresh()
+						}, w)
+				})
+				categoryPanels[group.ID] = panel
+			}
+			panel.refresh()
+			panels.Add(panel.content)
+		}
+	}
+	add := func() {
+		if err := db.addCategory(entry.Text); err != nil {
+			dialog.ShowError(err, w)
+			return
+		}
+		entry.SetText("")
+		refresh()
+		w.Canvas().Focus(entry)
+	}
+	entry.OnSubmitted = func(string) { add() }
+	addButton := widget.NewButtonWithIcon("Add category", theme.ContentAddIcon(), add)
+	addButton.Importance = widget.HighImportance
 	header := container.NewVBox(
 		widget.NewLabelWithStyle("scrivi", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Italic: true}),
 		container.NewBorder(nil, nil, nil, addButton, entry),
 	)
 	refresh()
-	return container.NewBorder(header, nil, nil, nil, container.NewVScroll(rows))
+	return container.NewBorder(header, nil, nil, nil, container.NewVScroll(panels))
 }
