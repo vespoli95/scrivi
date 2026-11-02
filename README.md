@@ -117,7 +117,8 @@ Download and open:
 <https://github.com/vespoli95/scrivi/releases/latest>
 
 The installer installs for the current user without administrator privileges,
-creates a Start menu shortcut, and offers an optional desktop shortcut.
+creates Start menu and desktop shortcuts by default, and lets you deselect the
+desktop shortcut during installation.
 It includes an uninstaller. Its fixed application ID must stay unchanged across
 versions so upgrades use the existing installation.
 

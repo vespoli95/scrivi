@@ -20,7 +20,7 @@ RestartApplications=no
 SetupLogging=yes
 
 [Tasks]
-Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
+Name: desktopicon; Description: "Create a desktop shortcut"
 
 [Files]
 Source: "{#ExecutablePath}"; DestDir: "{app}"; Flags: ignoreversion
