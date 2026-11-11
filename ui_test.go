@@ -1,7 +1,7 @@
 package main
 
 import (
-	"image/color"
+	"errors"
 	"math"
 	"strings"
 	"testing"
@@ -117,10 +117,7 @@ func TestCategoryUI(t *testing.T) {
 	if math.Abs(float64(headingPosition.X+heading.Size().Width/2-panelPosition.X-life.Size().Width/2)) > 0.01 {
 		t.Fatal("category heading is not centered in its panel")
 	}
-	frame := findUIObject(t, content, func(rectangle *canvas.Rectangle) bool {
-		return rectangle.StrokeColor == color.White && rectangle.StrokeWidth > 0
-	})
-	if frame.Size().Width != 340 || frame.Size().Height <= 240 || frame.Size().Height != uncategorized.Size().Height+2*theme.Padding() {
+	if uncategorized.Size().Width != 340 || uncategorized.Size().Height <= 240 {
 		t.Fatal("category panel does not stretch to fill the available window height")
 	}
 	findTodoEntry(life).SetText("Another draft")
@@ -173,6 +170,79 @@ func TestCategoryUI(t *testing.T) {
 	test.Tap(findButton(uncategorized, ""))
 	if len(db.list()) != 0 {
 		t.Fatal("moved todo could not be deleted")
+	}
+}
+
+func TestWindowOptions(t *testing.T) {
+	a := test.NewApp()
+	defer a.Quit()
+	w := a.NewWindow("Scrivi")
+	defer w.Close()
+	pinned, startup := false, true
+	failPin, failStartup, failRead := false, false, false
+	button := newOptionsButton(w, func(value bool) error {
+		if failPin {
+			return errors.New("pin failed")
+		}
+		pinned = value
+		return nil
+	}, func() (bool, error) {
+		if failRead {
+			return false, errors.New("read failed")
+		}
+		return startup, nil
+	}, func(value bool) error {
+		if failStartup {
+			return errors.New("startup failed")
+		}
+		startup = value
+		return nil
+	})
+	w.SetContent(button)
+	w.Show()
+	test.Tap(button)
+	settings := w.Canvas().Overlays().Top()
+	pinCheck := findUIObject(t, settings, func(check *pointerCheck) bool { return check.Text == "Keep window on top" })
+	startupCheck := findUIObject(t, settings, func(check *pointerCheck) bool { return check.Text == "Start Scrivi when I sign in" })
+	if pinCheck.Checked || !startupCheck.Checked {
+		t.Fatal("settings do not reflect current state")
+	}
+	test.Tap(pinCheck)
+	test.Tap(startupCheck)
+	if !pinned || startup {
+		t.Fatal("settings changes were not applied")
+	}
+	failPin, failStartup = true, true
+	test.Tap(pinCheck)
+	if !pinCheck.Checked || !pinned {
+		t.Fatal("failed pin change was not reverted")
+	}
+	test.Tap(findUIObject(t, w.Canvas().Overlays().Top(), func(button *pointerButton) bool { return button.Text == "OK" }))
+	test.Tap(startupCheck)
+	if startupCheck.Checked || startup {
+		t.Fatal("failed startup change was not reverted")
+	}
+	test.Tap(findUIObject(t, w.Canvas().Overlays().Top(), func(button *pointerButton) bool { return button.Text == "OK" }))
+	failPin, failStartup = false, false
+	test.Tap(pinCheck)
+	test.Tap(startupCheck)
+	if pinned || !startup {
+		t.Fatal("settings did not recover after an error")
+	}
+	test.Tap(findUIObject(t, settings, func(button *pointerButton) bool { return button.Text == "Close" }))
+	failRead = true
+	test.Tap(button)
+	findUIObject(t, w.Canvas().Overlays().Top(), func(label *widget.Label) bool { return label.Text == "read failed" })
+	test.Tap(findUIObject(t, w.Canvas().Overlays().Top(), func(button *pointerButton) bool { return button.Text == "OK" }))
+	settings = w.Canvas().Overlays().Top()
+	startupCheck = findUIObject(t, settings, func(check *pointerCheck) bool { return check.Text == "Start Scrivi when I sign in" })
+	if !startupCheck.Disabled() {
+		t.Fatal("startup control should be disabled when its state cannot be read")
+	}
+	pinCheck = findUIObject(t, settings, func(check *pointerCheck) bool { return check.Text == "Keep window on top" })
+	test.Tap(pinCheck)
+	if !pinned {
+		t.Fatal("startup read failure prevented pinning")
 	}
 }
 

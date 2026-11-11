@@ -1,7 +1,6 @@
 package main
 
 import (
-	"image/color"
 	"math"
 
 	"fyne.io/fyne/v2"
@@ -201,7 +200,7 @@ type centeredCategoryLayout struct {
 }
 
 func (l *centeredCategoryLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
-	padding := theme.Padding()
+	padding := theme.Padding() * 3
 	width := min(l.cellSize.Width, size.Width)
 	columns := max(1, int(math.Floor(float64((size.Width+padding)/(width+padding)))))
 	l.columns = columns
@@ -239,12 +238,40 @@ func (l *centeredCategoryLayout) MinSize(objects []fyne.CanvasObject) fyne.Size 
 	rows := max(1, (count+columns-1)/columns)
 	l.rows = rows
 	return fyne.NewSize(l.cellSize.Width,
-		float32(rows)*l.cellSize.Height+float32(rows-1)*theme.Padding())
+		float32(rows)*l.cellSize.Height+float32(rows-1)*theme.Padding()*3)
 }
 
 type todoCategoryPanel struct {
 	content fyne.CanvasObject
 	refresh func()
+}
+
+type categorySurface struct {
+	widget.BaseWidget
+}
+
+func newCategorySurface() *categorySurface {
+	surface := &categorySurface{}
+	surface.ExtendBaseWidget(surface)
+	return surface
+}
+
+func (s *categorySurface) CreateRenderer() fyne.WidgetRenderer {
+	background := canvas.NewRectangle(theme.ColorForWidget(theme.ColorNameInputBackground, s))
+	background.CornerRadius = theme.InputRadiusSize() * 2
+	return &categorySurfaceRenderer{WidgetRenderer: widget.NewSimpleRenderer(background), surface: s, background: background}
+}
+
+type categorySurfaceRenderer struct {
+	fyne.WidgetRenderer
+	surface    *categorySurface
+	background *canvas.Rectangle
+}
+
+func (r *categorySurfaceRenderer) Refresh() {
+	r.background.FillColor = theme.ColorForWidget(theme.ColorNameInputBackground, r.surface)
+	r.background.CornerRadius = theme.InputRadiusSize() * 2
+	r.WidgetRenderer.Refresh()
 }
 
 func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete func()) *todoCategoryPanel {
@@ -282,10 +309,13 @@ func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete 
 				}
 				refresh()
 			})
+			remove.Importance = widget.LowImportance
 			rows.Add(container.NewBorder(nil, nil, check, remove, title))
 		}
 		if count == 0 {
-			rows.Add(widget.NewLabel("No todos yet. Add one above."))
+			empty := widget.NewLabel("No todos yet. Add one above.")
+			empty.Importance = widget.LowImportance
+			rows.Add(empty)
 		}
 	}
 
@@ -305,7 +335,9 @@ func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete 
 	var iconButton *pointerButton
 	name := widget.NewLabelWithStyle(group.Name, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	if group.ID != 0 {
-		remove = newPointerButton("", theme.DeleteIcon(), onDelete)
+		deleteButton := newPointerButton("", theme.DeleteIcon(), onDelete)
+		deleteButton.Importance = widget.LowImportance
+		remove = deleteButton
 		iconButton = newPointerButton("Icon", nil, func() {
 			showCategoryEmojiPicker(w, db.categories[group.ID].Icon, func(icon string) {
 				if err := db.setCategoryIcon(group.ID, icon); err != nil {
@@ -315,6 +347,7 @@ func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete 
 				refresh()
 			})
 		})
+		iconButton.Importance = widget.LowImportance
 	}
 	name.Truncation = fyne.TextTruncateEllipsis
 	refreshRows := refresh
@@ -344,12 +377,8 @@ func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete 
 	)
 	refresh()
 	card := widget.NewCard("", "", container.NewBorder(header, nil, nil, nil, container.NewVScroll(rows)))
-	frame := canvas.NewRectangle(color.Transparent)
-	frame.StrokeColor = color.White
-	frame.StrokeWidth = 1
-	frame.CornerRadius = theme.InputRadiusSize()
 	return &todoCategoryPanel{
-		content: container.NewStack(frame, container.NewPadded(card)),
+		content: container.NewStack(newCategorySurface(), card),
 		refresh: refresh,
 	}
 }
@@ -418,10 +447,11 @@ func todoUI(w fyne.Window, db *memoryDB) fyne.CanvasObject {
 	})
 	addButton := newPointerButton("Add category", theme.ContentAddIcon(), add)
 	addButton.Importance = widget.HighImportance
+	title := widget.NewLabelWithStyle("scrivi", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Italic: true})
 	header := container.NewVBox(
-		widget.NewLabelWithStyle("scrivi", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Italic: true}),
+		container.NewBorder(nil, nil, nil, windowOptions(w), title),
 		container.NewBorder(nil, nil, iconButton, addButton, entry),
 	)
 	refresh()
-	return container.NewBorder(header, nil, nil, nil, container.NewVScroll(panels))
+	return container.NewPadded(container.NewBorder(header, nil, nil, nil, container.NewVScroll(panels)))
 }

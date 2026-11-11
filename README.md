@@ -4,10 +4,15 @@ A tiny Go desktop todo list built with Fyne. Add todos with the Add button or
 Enter, check them off, and delete them with the trash button.
 
 Create your own categories, such as Life, Money, or Work, using **Add category**
-or Enter. Each category appears as a window-like panel on the same page, with
+or Enter. Each category appears as a card on the same page, with
 its own todo entry and scrollable list. Use a category's trash button to remove
 it; its todos move to **Uncategorized**, which also holds your existing todos
 and cannot be deleted. Categories and their todos are saved across restarts.
+
+On Windows, **Settings** lets you keep Scrivi above other windows and choose
+whether it starts when you sign in. The startup choice persists; pinning lasts
+until you unpin the window or close Scrivi. Windows may also allow startup apps
+to be disabled in its own settings.
 
 Todos are kept in memory while the app runs. Each change is saved immediately
 to a local SQLite database and loaded back into memory on startup. No server
