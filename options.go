@@ -31,28 +31,49 @@ func newPinButton(w fyne.Window, setPinned func(bool) error) *pointerButton {
 	return button
 }
 
-func newOptionsButton(w fyne.Window, startupEnabled func() (bool, error), setStartup func(bool) error) *pointerButton {
+func newOptionsButton(w fyne.Window, db *memoryDB, startupEnabled func() (bool, error), setStartup func(bool) error) *pointerButton {
 	return newPointerButton("Settings", theme.SettingsIcon(), func() {
-		startup, startupErr := startupEnabled()
-		startupCheck := newPointerCheck()
-		startupCheck.Text = "Start Scrivi when I sign in"
-		startupCheck.SetChecked(startup)
-		if startupErr != nil {
-			startupCheck.Disable()
-		}
-		var changeStartup func(bool)
-		changeStartup = func(value bool) {
-			if err := setStartup(value); err != nil {
-				startupCheck.OnChanged = nil
-				startupCheck.SetChecked(startup)
-				startupCheck.OnChanged = changeStartup
+		themeSelect := widget.NewSelect(appThemes, nil)
+		themeSelect.SetSelected(db.appTheme)
+		var changeTheme func(string)
+		changeTheme = func(value string) {
+			previous := db.appTheme
+			if err := db.setAppTheme(value); err != nil {
+				themeSelect.OnChanged = nil
+				themeSelect.SetSelected(previous)
+				themeSelect.OnChanged = changeTheme
 				showError(err, w)
 				return
 			}
-			startup = value
+			fyne.CurrentApp().Settings().SetTheme(pastelTheme{name: value})
 		}
-		startupCheck.OnChanged = changeStartup
-		d := dialog.NewCustomWithoutButtons("Settings", container.NewVBox(startupCheck), w)
+		themeSelect.OnChanged = changeTheme
+		content := container.NewVBox(widget.NewLabel("App theme"), themeSelect)
+		var startupErr error
+		if startupEnabled != nil {
+			var startup bool
+			startup, startupErr = startupEnabled()
+			startupCheck := newPointerCheck()
+			startupCheck.Text = "Start Scrivi when I sign in"
+			startupCheck.SetChecked(startup)
+			if startupErr != nil {
+				startupCheck.Disable()
+			}
+			var changeStartup func(bool)
+			changeStartup = func(value bool) {
+				if err := setStartup(value); err != nil {
+					startupCheck.OnChanged = nil
+					startupCheck.SetChecked(startup)
+					startupCheck.OnChanged = changeStartup
+					showError(err, w)
+					return
+				}
+				startup = value
+			}
+			startupCheck.OnChanged = changeStartup
+			content.Add(startupCheck)
+		}
+		d := dialog.NewCustomWithoutButtons("Settings", content, w)
 		d.SetButtons([]fyne.CanvasObject{newPointerButton("Close", nil, d.Hide)})
 		d.Show()
 		if startupErr != nil {

@@ -10,100 +10,6 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-type todoTitleLayout struct {
-	title string
-}
-
-type todoTitleWidget struct {
-	widget.BaseWidget
-	content  fyne.CanvasObject
-	onTapped func()
-}
-
-func newTodoTitleWidget(content fyne.CanvasObject, onTapped func()) *todoTitleWidget {
-	title := &todoTitleWidget{content: content, onTapped: onTapped}
-	title.ExtendBaseWidget(title)
-	return title
-}
-
-func (t *todoTitleWidget) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(t.content)
-}
-
-func (t *todoTitleWidget) Tapped(*fyne.PointEvent) {
-	t.onTapped()
-}
-
-func (t *todoTitleWidget) Cursor() desktop.Cursor {
-	return desktop.PointerCursor
-}
-
-func (l *todoTitleLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
-	return fyne.MeasureText("…", theme.TextSize(), fyne.TextStyle{}).
-		Add(fyne.NewSquareSize(theme.InnerPadding() * 2))
-}
-
-func (l *todoTitleLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
-	text := objects[0].(*canvas.Text)
-	padding := theme.InnerPadding()
-	text.TextSize = theme.TextSize()
-	text.Text = truncateTodoTitle(l.title, max(0, size.Width-padding*2), text.TextSize)
-	text.Color = theme.ForegroundColor()
-	if len(objects) > 1 {
-		text.Color = theme.DisabledColor()
-	}
-	textSize := text.MinSize()
-	text.Move(fyne.NewPos(padding, (size.Height-textSize.Height)/2))
-	text.Resize(textSize)
-	text.Refresh()
-	if len(objects) == 1 {
-		return
-	}
-
-	line := objects[1].(*canvas.Line)
-	line.StrokeColor = text.Color
-	line.Move(fyne.NewPos(text.Position().X, size.Height/2))
-	line.Resize(fyne.NewSize(textSize.Width, 0))
-	if text.Text == "" {
-		line.Hide()
-	} else {
-		line.Show()
-	}
-	line.Refresh()
-}
-
-func truncateTodoTitle(title string, width, textSize float32) string {
-	measure := func(text string) float32 {
-		return fyne.MeasureText(text, textSize, fyne.TextStyle{}).Width
-	}
-	if measure(title) <= width {
-		return title
-	}
-	if measure("…") > width {
-		return ""
-	}
-	runes := []rune(title)
-	low, high := 0, len(runes)
-	for low < high {
-		mid := (low + high + 1) / 2
-		if measure(string(runes[:mid])+"…") <= width {
-			low = mid
-		} else {
-			high = mid - 1
-		}
-	}
-	return string(runes[:low]) + "…"
-}
-
-func newTodoTitle(title string, done bool, onTapped func()) fyne.CanvasObject {
-	text := canvas.NewText(title, theme.ForegroundColor())
-	objects := []fyne.CanvasObject{text}
-	if done {
-		objects = append(objects, canvas.NewLine(theme.DisabledColor()))
-	}
-	return newTodoTitleWidget(container.New(&todoTitleLayout{title: title}, objects...), onTapped)
-}
-
 type pointerButton struct {
 	widget.Button
 }
@@ -191,6 +97,27 @@ func showCategoryEmojiPicker(w fyne.Window, selected string, onSelected func(str
 	d.Show()
 }
 
+func showCategoryColorPicker(w fyne.Window, selected string, onSelected func(string)) {
+	choices := container.NewGridWithColumns(2)
+	d := dialog.NewCustomWithoutButtons("Category color", choices, w)
+	for _, name := range categoryColors {
+		value := name
+		if name == "Default" {
+			value = ""
+		}
+		button := newPointerButton(name, nil, func() {
+			d.Hide()
+			onSelected(value)
+		})
+		if value == selected {
+			button.Importance = widget.HighImportance
+		}
+		choices.Add(button)
+	}
+	d.SetButtons([]fyne.CanvasObject{newPointerButton("Cancel", theme.CancelIcon(), d.Hide)})
+	d.Show()
+}
+
 func showTodoEditor(w fyne.Window, db *memoryDB, item todo, refresh func()) {
 	entry := widget.NewEntry()
 	entry.SetText(item.Title)
@@ -217,6 +144,27 @@ type categoryGridLayout struct {
 	cellSize fyne.Size
 	rows     int
 	columns  int
+}
+
+type categoryHeadingLayout struct {
+	icon  *pointerButton
+	label *widget.Label
+}
+
+func (l *categoryHeadingLayout) MinSize([]fyne.CanvasObject) fyne.Size {
+	return l.icon.MinSize().AddWidthHeight(theme.Padding()+l.label.MinSize().Width, 0).Max(l.label.MinSize())
+}
+
+func (l *categoryHeadingLayout) Layout(_ []fyne.CanvasObject, size fyne.Size) {
+	iconSize := l.icon.MinSize()
+	labelWidth := fyne.MeasureText(l.label.Text, theme.TextSize(), l.label.TextStyle).Width + theme.InnerPadding()*4
+	labelWidth = min(labelWidth, max(0, size.Width-iconSize.Width-theme.Padding()))
+	width := iconSize.Width + theme.Padding() + labelWidth
+	start := max(0, (size.Width-width)/2)
+	l.icon.Move(fyne.NewPos(start, (size.Height-iconSize.Height)/2))
+	l.icon.Resize(iconSize)
+	l.label.Move(fyne.NewPos(start+iconSize.Width+theme.Padding(), 0))
+	l.label.Resize(fyne.NewSize(labelWidth, size.Height))
 }
 
 func (l *categoryGridLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
@@ -261,22 +209,29 @@ func (l *categoryGridLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 }
 
 type todoCategoryPanel struct {
-	content fyne.CanvasObject
-	refresh func()
+	id       int
+	content  fyne.CanvasObject
+	surface  *categorySurface
+	scroll   *nestedScroll
+	itemRows []*todoRow
+	refresh  func()
 }
 
 type categorySurface struct {
 	widget.BaseWidget
+	db          *memoryDB
+	color       string
+	highlighted bool
 }
 
-func newCategorySurface() *categorySurface {
-	surface := &categorySurface{}
+func newCategorySurface(db *memoryDB) *categorySurface {
+	surface := &categorySurface{db: db}
 	surface.ExtendBaseWidget(surface)
 	return surface
 }
 
 func (s *categorySurface) CreateRenderer() fyne.WidgetRenderer {
-	background := canvas.NewRectangle(theme.ColorForWidget(theme.ColorNameHeaderBackground, s))
+	background := canvas.NewRectangle(categoryColor(s.color, s.db.appTheme))
 	background.CornerRadius = theme.InputRadiusSize() * 2
 	return &categorySurfaceRenderer{WidgetRenderer: widget.NewSimpleRenderer(background), surface: s, background: background}
 }
@@ -288,26 +243,32 @@ type categorySurfaceRenderer struct {
 }
 
 func (r *categorySurfaceRenderer) Refresh() {
-	r.background.FillColor = theme.ColorForWidget(theme.ColorNameHeaderBackground, r.surface)
+	r.background.FillColor = categoryColor(r.surface.color, r.surface.db.appTheme)
 	r.background.CornerRadius = theme.InputRadiusSize() * 2
+	r.background.StrokeWidth = 0
+	if r.surface.highlighted {
+		r.background.StrokeWidth = 2
+		r.background.StrokeColor = theme.Color(theme.ColorNamePrimary)
+	}
 	r.WidgetRenderer.Refresh()
 }
 
-func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete func()) *todoCategoryPanel {
+func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete func(), drag *dragController) *todoCategoryPanel {
 	entry := widget.NewEntry()
 	entry.SetPlaceHolder("What needs doing?")
-	rows := container.NewVBox()
+	rowsLayout := &todoRowsLayout{width: 340}
+	rows := container.New(rowsLayout)
+	scroll := newNestedScroll(rows, rowsLayout, drag.scroll)
+	panel := &todoCategoryPanel{id: group.ID, surface: newCategorySurface(db), scroll: scroll}
 
 	var refresh func()
 	refresh = func() {
+		offset := scroll.Offset
+		rowsLayout.rows = nil
+		panel.itemRows = nil
 		rows.RemoveAll()
-		items := db.list()
-		count := 0
+		items := db.listCategoryTodos(group.ID)
 		for _, item := range items {
-			if item.CategoryID != group.ID {
-				continue
-			}
-			count++
 			check := newPointerCheck()
 			check.SetChecked(item.Done)
 			check.OnChanged = func(done bool) {
@@ -320,7 +281,8 @@ func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete 
 			}
 			title := newTodoTitle(item.Title, item.Done, func() {
 				check.SetChecked(!check.Checked)
-			})
+			}).(*todoTitleWidget)
+			handle := newDragHandle(drag.hover, func(point fyne.Position) { drag.dropTodo(item.ID, point) })
 			edit := newPointerButton("", theme.DocumentCreateIcon(), func() {
 				showTodoEditor(w, db, item, refresh)
 			})
@@ -333,13 +295,21 @@ func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete 
 				refresh()
 			})
 			remove.Importance = widget.LowImportance
-			rows.Add(container.NewBorder(nil, nil, check, container.NewHBox(edit, remove), title))
+			left := container.NewHBox(handle, check)
+			right := container.NewHBox(edit, remove)
+			row := &todoRow{id: item.ID, title: title, left: left, right: right}
+			row.content = container.NewBorder(nil, nil, left, right, title)
+			rowsLayout.rows = append(rowsLayout.rows, row)
+			panel.itemRows = append(panel.itemRows, row)
+			rows.Add(row.content)
 		}
-		if count == 0 {
+		if len(items) == 0 {
 			empty := widget.NewLabel("No todos yet. Add one above.")
 			empty.Importance = widget.LowImportance
 			rows.Add(empty)
 		}
+		scroll.Refresh()
+		scroll.ScrollToOffset(offset)
 	}
 
 	add := func() {
@@ -352,12 +322,12 @@ func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete 
 		w.Canvas().Focus(entry)
 	}
 	entry.OnSubmitted = func(string) { add() }
-	addButton := newPointerButton("Add", theme.ContentAddIcon(), add)
+	addButton := newPointerButton("", theme.ContentAddIcon(), add)
 	addButton.Importance = widget.HighImportance
 	name := widget.NewLabelWithStyle(group.Name, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	deleteButton := newPointerButton("", theme.DeleteIcon(), onDelete)
 	deleteButton.Importance = widget.LowImportance
-	iconButton := newPointerButton("Icon", nil, func() {
+	iconButton := newPointerButton("", theme.ContentAddIcon(), func() {
 		showCategoryEmojiPicker(w, db.categories[group.ID].Icon, func(icon string) {
 			if err := db.setCategoryIcon(group.ID, icon); err != nil {
 				showError(err, w)
@@ -367,33 +337,48 @@ func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete 
 		})
 	})
 	iconButton.Importance = widget.LowImportance
+	colorButton := newPointerButton("", theme.ColorPaletteIcon(), func() {
+		showCategoryColorPicker(w, db.categories[group.ID].Color, func(value string) {
+			if err := db.setCategoryColor(group.ID, value); err != nil {
+				showError(err, w)
+				return
+			}
+			refresh()
+		})
+	})
+	colorButton.Importance = widget.LowImportance
+	handle := newDragHandle(drag.hover, func(point fyne.Position) { drag.dropCategory(group.ID, point) })
 	name.Truncation = fyne.TextTruncateEllipsis
 	refreshRows := refresh
 	refresh = func() {
 		group = db.categories[group.ID]
-		title := group.Name
-		if group.Icon != "" {
-			title = group.Icon + " " + title
+		name.SetText(group.Name)
+		if group.Icon == "" {
+			iconButton.SetText("")
+			iconButton.SetIcon(theme.ContentAddIcon())
+		} else {
+			iconButton.SetIcon(nil)
+			iconButton.SetText(group.Icon)
 		}
-		name.SetText(title)
+		panel.surface.color = group.Color
+		panel.surface.Refresh()
 		refreshRows()
 	}
-	// Equal-width title-bar controls keep the category name centered.
-	controlSize := iconButton.MinSize().Max(deleteButton.MinSize())
+	controls := container.NewHBox(colorButton, deleteButton)
+	controlSize := controls.MinSize()
 	titleBar := container.NewBorder(nil, nil,
-		container.NewGridWrap(controlSize, iconButton),
-		container.NewGridWrap(controlSize, deleteButton), name)
+		container.NewGridWrap(controlSize, container.NewHBox(handle)),
+		controls, container.New(&categoryHeadingLayout{icon: iconButton, label: name}, iconButton, name))
 	header := container.NewVBox(
 		titleBar,
 		widget.NewSeparator(),
 		container.NewBorder(nil, nil, nil, addButton, entry),
 	)
 	refresh()
-	card := widget.NewCard("", "", container.NewBorder(header, nil, nil, nil, container.NewVScroll(rows)))
-	return &todoCategoryPanel{
-		content: container.NewStack(newCategorySurface(), card),
-		refresh: refresh,
-	}
+	card := widget.NewCard("", "", container.NewBorder(header, nil, nil, nil, scroll))
+	panel.content = container.NewStack(panel.surface, card)
+	panel.refresh = refresh
+	return panel
 }
 
 func todoUI(w fyne.Window, db *memoryDB) fyne.CanvasObject {
@@ -401,6 +386,8 @@ func todoUI(w fyne.Window, db *memoryDB) fyne.CanvasObject {
 	entry.SetPlaceHolder("Category name (Life, Money, Work...)")
 	panels := container.New(&categoryGridLayout{cellSize: fyne.NewSize(340, 240), columns: 2})
 	categoryPanels := make(map[int]*todoCategoryPanel)
+	scroll := container.NewVScroll(panels)
+	drag := &dragController{window: w, db: db, scroll: scroll, panels: categoryPanels}
 
 	var refresh func()
 	refresh = func() {
@@ -428,13 +415,14 @@ func todoUI(w fyne.Window, db *memoryDB) fyne.CanvasObject {
 							}
 							refresh()
 						}, w)
-				})
+				}, drag)
 				categoryPanels[group.ID] = panel
 			}
 			panel.refresh()
 			panels.Add(panel.content)
 		}
 	}
+	drag.refresh = refresh
 	var selectedIcon string
 	var iconButton *pointerButton
 	add := func() {
@@ -463,9 +451,9 @@ func todoUI(w fyne.Window, db *memoryDB) fyne.CanvasObject {
 	addButton.Importance = widget.HighImportance
 	title := widget.NewLabelWithStyle("scrivi", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Italic: true})
 	header := container.NewVBox(
-		container.NewBorder(nil, nil, nil, windowOptions(w), title),
+		container.NewBorder(nil, nil, nil, windowOptions(w, db), title),
 		container.NewBorder(nil, nil, iconButton, addButton, entry),
 	)
 	refresh()
-	return container.NewPadded(container.NewBorder(header, nil, nil, nil, container.NewVScroll(panels)))
+	return container.NewPadded(container.NewBorder(header, nil, nil, nil, scroll))
 }

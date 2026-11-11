@@ -20,12 +20,15 @@ type todo struct {
 	Title      string
 	Done       bool
 	CategoryID int
+	Position   int
 }
 
 type category struct {
-	ID   int
-	Name string
-	Icon string
+	ID       int
+	Name     string
+	Icon     string
+	Color    string
+	Position int
 }
 
 // memoryDB belongs to the UI goroutine. SQLite writes succeed before the cache changes.
@@ -33,6 +36,7 @@ type memoryDB struct {
 	disk       *sql.DB
 	todos      map[int]todo
 	categories map[int]category
+	appTheme   string
 }
 
 func openMemoryDB(path string) (*memoryDB, error) {
@@ -71,20 +75,32 @@ func (db *memoryDB) load() error {
 	if err := db.migrateCategoryIcons(); err != nil {
 		return err
 	}
+	if err := db.migrateAppearanceAndOrder(); err != nil {
+		return err
+	}
 	if err := db.recoverUncategorized(); err != nil {
 		return err
 	}
 	if err := db.loadCategories(); err != nil {
 		return err
 	}
-	rows, err := db.disk.Query("SELECT id, title, done, COALESCE(category_id, 0) FROM todos")
+	if err := db.disk.QueryRow("SELECT value FROM settings WHERE key = 'theme'").Scan(&db.appTheme); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("load theme: %w", err)
+	}
+	if db.appTheme == "" {
+		db.appTheme = defaultTheme
+	}
+	if !validAppTheme(db.appTheme) {
+		return fmt.Errorf("load theme: unknown theme %q", db.appTheme)
+	}
+	rows, err := db.disk.Query("SELECT id, title, done, COALESCE(category_id, 0), position FROM todos")
 	if err != nil {
 		return fmt.Errorf("load todos: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var item todo
-		if err := rows.Scan(&item.ID, &item.Title, &item.Done, &item.CategoryID); err != nil {
+		if err := rows.Scan(&item.ID, &item.Title, &item.Done, &item.CategoryID, &item.Position); err != nil {
 			return fmt.Errorf("read todo: %w", err)
 		}
 		db.todos[item.ID] = item
@@ -122,15 +138,18 @@ func (db *memoryDB) migrateCategories() error {
 }
 
 func (db *memoryDB) loadCategories() error {
-	rows, err := db.disk.Query("SELECT id, name, icon FROM categories")
+	rows, err := db.disk.Query("SELECT id, name, icon, color, position FROM categories")
 	if err != nil {
 		return fmt.Errorf("load categories: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var item category
-		if err := rows.Scan(&item.ID, &item.Name, &item.Icon); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Icon, &item.Color, &item.Position); err != nil {
 			return fmt.Errorf("read category: %w", err)
+		}
+		if !validCategoryColor(item.Color) {
+			return fmt.Errorf("read category %d: unknown color %q", item.ID, item.Color)
 		}
 		db.categories[item.ID] = item
 	}
@@ -152,7 +171,13 @@ func (db *memoryDB) addInCategory(title string, categoryID int) error {
 	if _, ok := db.categories[categoryID]; !ok {
 		return errCategoryNotFound
 	}
-	result, err := db.disk.Exec("INSERT INTO todos (title, category_id) VALUES (?, ?)", title, categoryID)
+	position := 0
+	for _, item := range db.todos {
+		if item.CategoryID == categoryID {
+			position = max(position, item.Position+1)
+		}
+	}
+	result, err := db.disk.Exec("INSERT INTO todos (title, category_id, position) VALUES (?, ?, ?)", title, categoryID, position)
 	if err != nil {
 		return fmt.Errorf("save todo: %w", err)
 	}
@@ -160,7 +185,7 @@ func (db *memoryDB) addInCategory(title string, categoryID int) error {
 	if err != nil {
 		return fmt.Errorf("get saved todo ID: %w", err)
 	}
-	db.todos[int(id)] = todo{ID: int(id), Title: title, CategoryID: categoryID}
+	db.todos[int(id)] = todo{ID: int(id), Title: title, CategoryID: categoryID, Position: position}
 	return nil
 }
 
@@ -181,7 +206,11 @@ func (db *memoryDB) addCategoryWithIcon(name, icon string) error {
 			return errors.New("a category with that name already exists")
 		}
 	}
-	result, err := db.disk.Exec("INSERT INTO categories (name, icon) VALUES (?, ?)", name, icon)
+	position := 0
+	for _, item := range db.categories {
+		position = max(position, item.Position+1)
+	}
+	result, err := db.disk.Exec("INSERT INTO categories (name, icon, position) VALUES (?, ?, ?)", name, icon, position)
 	if err != nil {
 		return fmt.Errorf("save category: %w", err)
 	}
@@ -189,7 +218,7 @@ func (db *memoryDB) addCategoryWithIcon(name, icon string) error {
 	if err != nil {
 		return fmt.Errorf("get saved category ID: %w", err)
 	}
-	db.categories[int(id)] = category{ID: int(id), Name: name, Icon: icon}
+	db.categories[int(id)] = category{ID: int(id), Name: name, Icon: icon, Position: position}
 	return nil
 }
 
@@ -219,6 +248,56 @@ func (db *memoryDB) migrateCategoryIcons() error {
 	return nil
 }
 
+func (db *memoryDB) migrateAppearanceAndOrder() error {
+	tx, err := db.disk.Begin()
+	if err != nil {
+		return fmt.Errorf("begin appearance migration: %w", err)
+	}
+	for _, column := range []struct {
+		table, name, definition string
+	}{
+		{"categories", "position", "INTEGER NOT NULL DEFAULT 0"},
+		{"categories", "color", "TEXT NOT NULL DEFAULT ''"},
+		{"todos", "position", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		rows, err := tx.Query("PRAGMA table_info(" + column.table + ")")
+		if err != nil {
+			return errors.Join(fmt.Errorf("inspect %s schema: %w", column.table, err), tx.Rollback())
+		}
+		found := false
+		for rows.Next() {
+			var id, notNull, primaryKey int
+			var name, columnType string
+			var defaultValue sql.NullString
+			if err := rows.Scan(&id, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+				return errors.Join(fmt.Errorf("read %s schema: %w", column.table, err), rows.Close(), tx.Rollback())
+			}
+			found = found || name == column.name
+		}
+		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+			return errors.Join(fmt.Errorf("inspect %s schema: %w", column.table, err), tx.Rollback())
+		}
+		if found {
+			continue
+		}
+		if _, err := tx.Exec("ALTER TABLE " + column.table + " ADD COLUMN " + column.name + " " + column.definition); err != nil {
+			return errors.Join(fmt.Errorf("migrate %s %s: %w", column.table, column.name, err), tx.Rollback())
+		}
+		if column.name == "position" {
+			if _, err := tx.Exec("UPDATE " + column.table + " SET position = id"); err != nil {
+				return errors.Join(fmt.Errorf("initialize %s order: %w", column.table, err), tx.Rollback())
+			}
+		}
+	}
+	if _, err := tx.Exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"); err != nil {
+		return errors.Join(fmt.Errorf("initialize settings: %w", err), tx.Rollback())
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("save appearance migration: %w", err)
+	}
+	return nil
+}
+
 func (db *memoryDB) recoverUncategorized() error {
 	var count int
 	if err := db.disk.QueryRow("SELECT COUNT(*) FROM todos WHERE category_id IS NULL").Scan(&count); err != nil {
@@ -242,7 +321,7 @@ func (db *memoryDB) recoverUncategorized() error {
 		}
 		name = fmt.Sprintf("Recovered todos %d", suffix)
 	}
-	result, err := tx.Exec("INSERT INTO categories (name) VALUES (?)", name)
+	result, err := tx.Exec("INSERT INTO categories (name, position) SELECT ?, COALESCE(MAX(position), -1) + 1 FROM categories", name)
 	if err != nil {
 		return errors.Join(fmt.Errorf("create recovery category: %w", err), tx.Rollback())
 	}
@@ -276,6 +355,33 @@ func (db *memoryDB) setCategoryIcon(id int, icon string) error {
 	return nil
 }
 
+func (db *memoryDB) setCategoryColor(id int, color string) error {
+	item, ok := db.categories[id]
+	if !ok {
+		return errCategoryNotFound
+	}
+	if !validCategoryColor(color) {
+		return errors.New("choose a valid category color")
+	}
+	if _, err := db.disk.Exec("UPDATE categories SET color = ? WHERE id = ?", color, id); err != nil {
+		return fmt.Errorf("save category color: %w", err)
+	}
+	item.Color = color
+	db.categories[id] = item
+	return nil
+}
+
+func (db *memoryDB) setAppTheme(name string) error {
+	if !validAppTheme(name) {
+		return errors.New("choose a valid theme")
+	}
+	if _, err := db.disk.Exec("INSERT INTO settings (key, value) VALUES ('theme', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", name); err != nil {
+		return fmt.Errorf("save theme: %w", err)
+	}
+	db.appTheme = name
+	return nil
+}
+
 var categoryEmojis = []string{
 	"🏠", "💼", "💰", "📚", "🛒", "🎯",
 	"❤️", "💪", "🍽️", "✈️", "🎨", "🎵",
@@ -301,6 +407,9 @@ func (db *memoryDB) listCategories() []category {
 		items = append(items, item)
 	}
 	sort.Slice(items, func(i, j int) bool {
+		if items[i].Position != items[j].Position {
+			return items[i].Position < items[j].Position
+		}
 		return items[i].ID < items[j].ID
 	})
 	return items
@@ -358,6 +467,99 @@ func (db *memoryDB) list() []todo {
 		return todos[i].ID < todos[j].ID
 	})
 	return todos
+}
+
+func (db *memoryDB) listCategoryTodos(categoryID int) []todo {
+	var items []todo
+	for _, item := range db.todos {
+		if item.CategoryID == categoryID {
+			items = append(items, item)
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Position != items[j].Position {
+			return items[i].Position < items[j].Position
+		}
+		return items[i].ID < items[j].ID
+	})
+	return items
+}
+
+func (db *memoryDB) moveCategory(id, index int) error {
+	if _, ok := db.categories[id]; !ok {
+		return errCategoryNotFound
+	}
+	groups := db.listCategories()
+	remaining := make([]category, 0, len(groups)-1)
+	for _, group := range groups {
+		if group.ID != id {
+			remaining = append(remaining, group)
+		}
+	}
+	if index < 0 || index > len(remaining) {
+		return errors.New("invalid category position")
+	}
+	remaining = append(remaining, category{})
+	copy(remaining[index+1:], remaining[index:])
+	remaining[index] = db.categories[id]
+	tx, err := db.disk.Begin()
+	if err != nil {
+		return fmt.Errorf("begin category reorder: %w", err)
+	}
+	for position, group := range remaining {
+		if _, err := tx.Exec("UPDATE categories SET position = ? WHERE id = ?", position, group.ID); err != nil {
+			return errors.Join(fmt.Errorf("save category order: %w", err), tx.Rollback())
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("save category order: %w", err)
+	}
+	for position, group := range remaining {
+		group.Position = position
+		db.categories[group.ID] = group
+	}
+	return nil
+}
+
+func (db *memoryDB) moveTodo(id, categoryID, index int) error {
+	item, ok := db.todos[id]
+	if !ok {
+		return errTodoNotFound
+	}
+	if _, ok := db.categories[categoryID]; !ok {
+		return errCategoryNotFound
+	}
+	var remaining []todo
+	for _, target := range db.listCategoryTodos(categoryID) {
+		if target.ID != id {
+			remaining = append(remaining, target)
+		}
+	}
+	if index < 0 || index > len(remaining) {
+		return errors.New("invalid todo position")
+	}
+	remaining = append(remaining, todo{})
+	copy(remaining[index+1:], remaining[index:])
+	item.CategoryID = categoryID
+	remaining[index] = item
+	tx, err := db.disk.Begin()
+	if err != nil {
+		return fmt.Errorf("begin todo move: %w", err)
+	}
+	for position, target := range remaining {
+		if _, err := tx.Exec("UPDATE todos SET category_id = ?, position = ? WHERE id = ?", categoryID, position, target.ID); err != nil {
+			return errors.Join(fmt.Errorf("save todo order: %w", err), tx.Rollback())
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("save todo order: %w", err)
+	}
+	for position, target := range remaining {
+		target.CategoryID = categoryID
+		target.Position = position
+		db.todos[target.ID] = target
+	}
+	return nil
 }
 
 func (db *memoryDB) setDone(id int, done bool) error {

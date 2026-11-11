@@ -5,9 +5,12 @@ Enter, check them off, and delete them with the trash button.
 
 Create categories, such as Life, Money, or Work, using **Add category** or Enter.
 Each category has its own todo entry and scrollable list. Use a todo's edit
-button to change its text. Deleting a category also deletes its todos after
-confirmation. Categories and todos are saved across restarts. Older unassigned
-todos, if any, are preserved in a regular **Recovered todos** category.
+button to change its text. Long todos wrap onto multiple lines. Drag the dotted
+handles to reorder categories or todos, or to move a todo to another category.
+The palette button changes a category's color; **Settings** changes the app
+theme. These choices and ordering are saved across restarts. Deleting a category
+also deletes its todos after confirmation. Older unassigned todos, if any, are
+preserved in a regular **Recovered todos** category.
 
 On Windows, use the **Pin** button to keep Scrivi above other windows.
 **Settings** lets you choose whether Scrivi starts when you sign in. The startup

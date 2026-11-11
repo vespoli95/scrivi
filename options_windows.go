@@ -17,10 +17,10 @@ const startupValue = "Scrivi"
 
 var setWindowPos = syscall.NewLazyDLL("user32.dll").NewProc("SetWindowPos").Call
 
-func windowOptions(w fyne.Window) fyne.CanvasObject {
+func windowOptions(w fyne.Window, db *memoryDB) fyne.CanvasObject {
 	return container.NewHBox(
 		newPinButton(w, func(pinned bool) error { return setWindowPinned(w, pinned) }),
-		newOptionsButton(w, startupEnabled, setStartup),
+		newOptionsButton(w, db, startupEnabled, setStartup),
 	)
 }
 

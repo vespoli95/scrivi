@@ -149,6 +149,122 @@ func TestCategoryIconsPersistAndPreserveCacheOnFailure(t *testing.T) {
 	checkPersisted("")
 }
 
+func TestOrderMovesAndThemesPersist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "todos.sqlite")
+	db, err := openMemoryDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.close()
+	for _, name := range []string{"Life", "Work", "Home"} {
+		if err := db.addCategory(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	groups := db.listCategories()
+	for _, title := range []string{"A", "B", "C"} {
+		if err := db.addInCategory(title, groups[0].ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.addInCategory("D", groups[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	items := db.list()
+	if err := db.setDone(items[1].ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.moveCategory(groups[2].ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.moveTodo(items[2].ID, groups[0].ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.moveTodo(items[1].ID, groups[1].ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.setAppTheme("Ocean"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.setCategoryColor(groups[1].ID, "Rose"); err != nil {
+		t.Fatal(err)
+	}
+	if got := db.listCategories(); got[0].Name != "Home" || got[1].Name != "Life" || got[2].Name != "Work" {
+		t.Fatalf("unexpected category order: %+v", got)
+	}
+	life, work := db.listCategoryTodos(groups[0].ID), db.listCategoryTodos(groups[1].ID)
+	if len(life) != 2 || life[0].Title != "C" || life[1].Title != "A" || len(work) != 2 || work[0].Title != "B" || !work[0].Done || work[1].Title != "D" {
+		t.Fatalf("unexpected todo order: life=%+v work=%+v", life, work)
+	}
+	reopened, err := openMemoryDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.close()
+	if !reflect.DeepEqual(db.listCategories(), reopened.listCategories()) ||
+		!reflect.DeepEqual(life, reopened.listCategoryTodos(groups[0].ID)) ||
+		!reflect.DeepEqual(work, reopened.listCategoryTodos(groups[1].ID)) ||
+		reopened.appTheme != "Ocean" || reopened.categories[groups[1].ID].Color != "Rose" {
+		t.Fatal("moves or themes were not persisted")
+	}
+	if err := reopened.addInCategory("E", groups[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.listCategoryTodos(groups[1].ID); got[len(got)-1].Title != "E" {
+		t.Fatal("new todos should follow moved todos")
+	}
+}
+
+func TestOrderAndThemeFailuresPreserveState(t *testing.T) {
+	db := newTestDB(t)
+	for _, name := range []string{"Life", "Work"} {
+		if err := db.addCategory(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	groups := db.listCategories()
+	for _, title := range []string{"A", "B"} {
+		if err := db.addInCategory(title, groups[0].ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items := db.list()
+	if err := db.moveTodo(items[0].ID, 42, 0); !errors.Is(err, errCategoryNotFound) {
+		t.Fatalf("unexpected missing target error: %v", err)
+	}
+	if err := db.moveTodo(items[0].ID, groups[1].ID, 2); err == nil {
+		t.Fatal("accepted invalid todo position")
+	}
+	if err := db.moveCategory(groups[0].ID, -1); err == nil {
+		t.Fatal("accepted invalid category position")
+	}
+	if err := db.setAppTheme("unknown"); err == nil {
+		t.Fatal("accepted invalid theme")
+	}
+	if err := db.setCategoryColor(groups[0].ID, "unknown"); err == nil {
+		t.Fatal("accepted invalid category color")
+	}
+	if _, err := db.disk.Exec(`CREATE TRIGGER prevent_reorder BEFORE UPDATE OF position ON todos
+		WHEN OLD.id = 1 BEGIN SELECT RAISE(ABORT, 'reorder blocked'); END;
+		CREATE TRIGGER prevent_category_reorder BEFORE UPDATE OF position ON categories
+		WHEN OLD.id = 1 BEGIN SELECT RAISE(ABORT, 'reorder blocked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.moveTodo(items[1].ID, groups[0].ID, 0); err == nil {
+		t.Fatal("expected todo reorder failure")
+	}
+	if err := db.moveCategory(groups[1].ID, 0); err == nil {
+		t.Fatal("expected category reorder failure")
+	}
+	if !reflect.DeepEqual(db.list(), items) || !reflect.DeepEqual(db.listCategories(), groups) || db.appTheme != defaultTheme {
+		t.Fatal("failed operations changed cached state")
+	}
+	var position int
+	if err := db.disk.QueryRow("SELECT position FROM todos WHERE id = ?", items[1].ID).Scan(&position); err != nil || position != items[1].Position {
+		t.Fatalf("failed todo reorder changed disk: position=%d err=%v", position, err)
+	}
+}
+
 func TestExistingCategoriesMigrateWithoutLosingData(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "todos.sqlite")
 	legacy, err := sql.Open("sqlite3", path)
@@ -172,8 +288,8 @@ func TestExistingCategoriesMigrateWithoutLosingData(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.close()
-	if db.categories[1] != (category{ID: 1, Name: "Work"}) ||
-		!reflect.DeepEqual(db.list(), []todo{{ID: 1, Title: "Keep", Done: true, CategoryID: 1}}) {
+	if db.categories[1] != (category{ID: 1, Name: "Work", Position: 1}) ||
+		!reflect.DeepEqual(db.list(), []todo{{ID: 1, Title: "Keep", Done: true, CategoryID: 1, Position: 1}}) {
 		t.Fatal("icon migration changed existing categories or todos")
 	}
 	if err := db.setCategoryIcon(1, "💼"); err != nil {
@@ -249,7 +365,7 @@ func TestExistingTodosMigrateToRecoveryCategory(t *testing.T) {
 	if len(groups) != 1 || groups[0].Name != "Recovered todos" {
 		t.Fatalf("missing recovery category: %+v", groups)
 	}
-	expected := []todo{{ID: 1, Title: "Keep", CategoryID: groups[0].ID}, {ID: 2, Title: "Complete", Done: true, CategoryID: groups[0].ID}}
+	expected := []todo{{ID: 1, Title: "Keep", CategoryID: groups[0].ID, Position: 1}, {ID: 2, Title: "Complete", Done: true, CategoryID: groups[0].ID, Position: 2}}
 	if !reflect.DeepEqual(db.list(), expected) {
 		t.Fatalf("migration changed existing todos: %+v", db.list())
 	}

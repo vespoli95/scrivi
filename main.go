@@ -16,7 +16,6 @@ var appIconData []byte
 
 func main() {
 	a := app.New()
-	a.Settings().SetTheme(pastelTheme{})
 	icon := fyne.NewStaticResource("scrivi.svg", appIconData)
 	a.SetIcon(icon)
 	w := a.NewWindow("Scrivi")
@@ -35,6 +34,7 @@ func main() {
 			log.Printf("close todo database: %v", err)
 		}
 	}()
+	a.Settings().SetTheme(pastelTheme{name: db.appTheme})
 	w.SetContent(todoUI(w, db))
 	w.Resize(fyne.NewSize(760, 600))
 	checkForUpdates(a, w)
