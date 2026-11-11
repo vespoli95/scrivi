@@ -117,7 +117,7 @@ func TestCategoryUI(t *testing.T) {
 	if math.Abs(float64(headingPosition.X+heading.Size().Width/2-panelPosition.X-life.Size().Width/2)) > 0.01 {
 		t.Fatal("category heading is not centered in its panel")
 	}
-	if uncategorized.Size().Width != 340 || uncategorized.Size().Height <= 240 {
+	if uncategorized.Size().Width <= 340 || uncategorized.Size().Height <= 240 {
 		t.Fatal("category panel does not stretch to fill the available window height")
 	}
 	findTodoEntry(life).SetText("Another draft")
@@ -180,13 +180,14 @@ func TestWindowOptions(t *testing.T) {
 	defer w.Close()
 	pinned, startup := false, true
 	failPin, failStartup, failRead := false, false, false
-	button := newOptionsButton(w, func(value bool) error {
+	pinButton := newPinButton(w, func(value bool) error {
 		if failPin {
 			return errors.New("pin failed")
 		}
 		pinned = value
 		return nil
-	}, func() (bool, error) {
+	})
+	button := newOptionsButton(w, func() (bool, error) {
 		if failRead {
 			return false, errors.New("read failed")
 		}
@@ -198,35 +199,45 @@ func TestWindowOptions(t *testing.T) {
 		startup = value
 		return nil
 	})
-	w.SetContent(button)
+	w.SetContent(container.NewHBox(pinButton, button))
 	w.Show()
-	test.Tap(button)
-	settings := w.Canvas().Overlays().Top()
-	pinCheck := findUIObject(t, settings, func(check *pointerCheck) bool { return check.Text == "Keep window on top" })
-	startupCheck := findUIObject(t, settings, func(check *pointerCheck) bool { return check.Text == "Start Scrivi when I sign in" })
-	if pinCheck.Checked || !startupCheck.Checked {
-		t.Fatal("settings do not reflect current state")
+	if pinButton.Icon == nil || pinButton.Text != "Pin" {
+		t.Fatal("pin control is not visible on the main screen")
 	}
-	test.Tap(pinCheck)
-	test.Tap(startupCheck)
-	if !pinned || startup {
-		t.Fatal("settings changes were not applied")
+	test.Tap(pinButton)
+	if !pinned || pinButton.Text != "Unpin" || pinButton.Importance != widget.HighImportance {
+		t.Fatal("pin control did not indicate the pinned state")
 	}
-	failPin, failStartup = true, true
-	test.Tap(pinCheck)
-	if !pinCheck.Checked || !pinned {
-		t.Fatal("failed pin change was not reverted")
+	failPin = true
+	test.Tap(pinButton)
+	if !pinned || pinButton.Text != "Unpin" || pinButton.Importance != widget.HighImportance {
+		t.Fatal("failed pin change altered the displayed state")
 	}
 	test.Tap(findUIObject(t, w.Canvas().Overlays().Top(), func(button *pointerButton) bool { return button.Text == "OK" }))
+	failPin = false
+	test.Tap(pinButton)
+	if pinned || pinButton.Text != "Pin" || pinButton.Importance == widget.HighImportance {
+		t.Fatal("unpin did not restore the unpinned state")
+	}
+	test.Tap(button)
+	settings := w.Canvas().Overlays().Top()
+	startupCheck := findUIObject(t, settings, func(check *pointerCheck) bool { return check.Text == "Start Scrivi when I sign in" })
+	if !startupCheck.Checked {
+		t.Fatal("settings do not reflect current state")
+	}
+	test.Tap(startupCheck)
+	if startup {
+		t.Fatal("settings changes were not applied")
+	}
+	failStartup = true
 	test.Tap(startupCheck)
 	if startupCheck.Checked || startup {
 		t.Fatal("failed startup change was not reverted")
 	}
 	test.Tap(findUIObject(t, w.Canvas().Overlays().Top(), func(button *pointerButton) bool { return button.Text == "OK" }))
-	failPin, failStartup = false, false
-	test.Tap(pinCheck)
+	failStartup = false
 	test.Tap(startupCheck)
-	if pinned || !startup {
+	if !startup {
 		t.Fatal("settings did not recover after an error")
 	}
 	test.Tap(findUIObject(t, settings, func(button *pointerButton) bool { return button.Text == "Close" }))
@@ -239,8 +250,8 @@ func TestWindowOptions(t *testing.T) {
 	if !startupCheck.Disabled() {
 		t.Fatal("startup control should be disabled when its state cannot be read")
 	}
-	pinCheck = findUIObject(t, settings, func(check *pointerCheck) bool { return check.Text == "Keep window on top" })
-	test.Tap(pinCheck)
+	test.Tap(findUIObject(t, settings, func(button *pointerButton) bool { return button.Text == "Close" }))
+	test.Tap(pinButton)
 	if !pinned {
 		t.Fatal("startup read failure prevented pinning")
 	}
@@ -277,25 +288,29 @@ func TestTodoStrikethroughFollowsRenderedText(t *testing.T) {
 	}
 }
 
-func TestCategoryRowsAreCentered(t *testing.T) {
+func TestCategoryRowsFillAvailableWidth(t *testing.T) {
 	a := test.NewApp()
 	defer a.Quit()
-	for _, width := range []float32{340, 760, 1200} {
+	for _, width := range []float32{300, 340, 760, 1200} {
 		objects := []fyne.CanvasObject{
 			canvas.NewRectangle(nil), canvas.NewRectangle(nil), canvas.NewRectangle(nil),
 			canvas.NewRectangle(nil), canvas.NewRectangle(nil),
 		}
-		layout := &centeredCategoryLayout{cellSize: fyne.NewSize(340, 320)}
+		layout := &categoryGridLayout{cellSize: fyne.NewSize(340, 320)}
 		layout.Layout(objects, fyne.NewSize(width, 600))
 		for start := 0; start < len(objects); {
 			end := start
 			for end+1 < len(objects) && objects[end+1].Position().Y == objects[start].Position().Y {
 				end++
 			}
-			left := objects[start].Position().X
-			right := width - objects[end].Position().X - objects[end].Size().Width
-			if math.Abs(float64(left-right)) > 0.01 {
-				t.Fatalf("row is not centered at width %v: left=%v right=%v", width, left, right)
+			if objects[start].Position().X != 0 || math.Abs(float64(width-objects[end].Position().X-objects[end].Size().Width)) > 0.01 {
+				t.Fatalf("row does not fill width %v", width)
+			}
+			for i := start + 1; i <= end; i++ {
+				gap := objects[i].Position().X - objects[i-1].Position().X - objects[i-1].Size().Width
+				if math.Abs(float64(gap-theme.Padding()*3)) > 0.01 || objects[i].Size().Width != objects[start].Size().Width {
+					t.Fatalf("row has uneven widths or gaps at width %v", width)
+				}
 			}
 			start = end + 1
 		}
@@ -305,10 +320,45 @@ func TestCategoryRowsAreCentered(t *testing.T) {
 		}
 	}
 	objects := []fyne.CanvasObject{canvas.NewRectangle(nil)}
-	layout := &centeredCategoryLayout{cellSize: fyne.NewSize(340, 320)}
+	layout := &categoryGridLayout{cellSize: fyne.NewSize(340, 320)}
 	layout.Layout(objects, fyne.NewSize(760, 600))
-	if objects[0].Size().Height != 600 {
-		t.Fatal("category panel did not stretch to fill the available window height")
+	if objects[0].Size() != fyne.NewSize(760, 600) {
+		t.Fatal("single category panel did not stretch to fill the available space")
+	}
+}
+
+func TestCategoryGridResizesInScroll(t *testing.T) {
+	a := test.NewApp()
+	defer a.Quit()
+	w := a.NewWindow("Scrivi")
+	defer w.Close()
+	db := newTestDB(t)
+	for _, name := range []string{"Life", "Work", "Home", "Other"} {
+		if err := db.addCategoryWithIcon(name, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	content := todoUI(w, db)
+	w.SetContent(content)
+	w.Show()
+	scroll := findUIObject(t, content, func(scroll *container.Scroll) bool {
+		group, ok := scroll.Content.(*fyne.Container)
+		if !ok {
+			return false
+		}
+		_, ok = group.Layout.(*categoryGridLayout)
+		return ok
+	})
+	for _, width := range []float32{1200, 400, 760, 1200} {
+		w.Resize(fyne.NewSize(width, 600))
+		grid := scroll.Content.(*fyne.Container)
+		last := grid.Objects[len(grid.Objects)-1]
+		if last.Position().Y+last.Size().Height > grid.Size().Height+0.01 {
+			t.Fatalf("last category is outside the scroll content after resizing to %v", width)
+		}
+		if math.Abs(float64(last.Position().X+last.Size().Width-grid.Size().Width)) > 0.01 {
+			t.Fatalf("last row does not fill the grid after resizing to %v", width)
+		}
 	}
 }
 

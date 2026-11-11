@@ -7,6 +7,7 @@ import (
 	"syscall"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver"
 	"golang.org/x/sys/windows/registry"
 )
@@ -17,9 +18,10 @@ const startupValue = "Scrivi"
 var setWindowPos = syscall.NewLazyDLL("user32.dll").NewProc("SetWindowPos").Call
 
 func windowOptions(w fyne.Window) fyne.CanvasObject {
-	return newOptionsButton(w, func(pinned bool) error {
-		return setWindowPinned(w, pinned)
-	}, startupEnabled, setStartup)
+	return container.NewHBox(
+		newPinButton(w, func(pinned bool) error { return setWindowPinned(w, pinned) }),
+		newOptionsButton(w, startupEnabled, setStartup),
+	)
 }
 
 func setWindowPinned(w fyne.Window, pinned bool) error {

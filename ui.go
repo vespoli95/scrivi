@@ -1,8 +1,6 @@
 package main
 
 import (
-	"math"
-
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
@@ -193,16 +191,15 @@ func showCategoryEmojiPicker(w fyne.Window, selected string, onSelected func(str
 	d.Show()
 }
 
-type centeredCategoryLayout struct {
+type categoryGridLayout struct {
 	cellSize fyne.Size
 	rows     int
 	columns  int
 }
 
-func (l *centeredCategoryLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+func (l *categoryGridLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 	padding := theme.Padding() * 3
-	width := min(l.cellSize.Width, size.Width)
-	columns := max(1, int(math.Floor(float64((size.Width+padding)/(width+padding)))))
+	columns := max(1, int((size.Width+padding)/(l.cellSize.Width+padding)))
 	l.columns = columns
 	var visible []fyne.CanvasObject
 	for _, object := range objects {
@@ -217,17 +214,17 @@ func (l *centeredCategoryLayout) Layout(objects []fyne.CanvasObject, size fyne.S
 	}
 	for start := 0; start < len(visible); start += columns {
 		count := min(columns, len(visible)-start)
-		rowWidth := float32(count)*width + float32(count-1)*padding
+		width := max(0, (size.Width-float32(count-1)*padding)/float32(count))
 		for column := 0; column < count; column++ {
 			object := visible[start+column]
-			object.Move(fyne.NewPos((size.Width-rowWidth)/2+float32(column)*(width+padding),
+			object.Move(fyne.NewPos(float32(column)*(width+padding),
 				float32(start/columns)*(cellHeight+padding)))
 			object.Resize(fyne.NewSize(width, cellHeight))
 		}
 	}
 }
 
-func (l *centeredCategoryLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+func (l *categoryGridLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	columns := max(1, l.columns)
 	count := 0
 	for _, object := range objects {
@@ -386,7 +383,7 @@ func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete 
 func todoUI(w fyne.Window, db *memoryDB) fyne.CanvasObject {
 	entry := widget.NewEntry()
 	entry.SetPlaceHolder("Category name (Life, Money, Work...)")
-	panels := container.New(&centeredCategoryLayout{cellSize: fyne.NewSize(340, 240), columns: 2})
+	panels := container.New(&categoryGridLayout{cellSize: fyne.NewSize(340, 240), columns: 2})
 	categoryPanels := make(map[int]*todoCategoryPanel)
 
 	var refresh func()

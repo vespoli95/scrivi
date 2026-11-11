@@ -9,10 +9,10 @@ its own todo entry and scrollable list. Use a category's trash button to remove
 it; its todos move to **Uncategorized**, which also holds your existing todos
 and cannot be deleted. Categories and their todos are saved across restarts.
 
-On Windows, **Settings** lets you keep Scrivi above other windows and choose
-whether it starts when you sign in. The startup choice persists; pinning lasts
-until you unpin the window or close Scrivi. Windows may also allow startup apps
-to be disabled in its own settings.
+On Windows, use the **Pin** button to keep Scrivi above other windows.
+**Settings** lets you choose whether Scrivi starts when you sign in. The startup
+choice persists; pinning lasts until you unpin the window or close Scrivi.
+Windows may also allow startup apps to be disabled in its own settings.
 
 Todos are kept in memory while the app runs. Each change is saved immediately
 to a local SQLite database and loaded back into memory on startup. No server
