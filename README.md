@@ -3,11 +3,11 @@
 A tiny Go desktop todo list built with Fyne. Add todos with the Add button or
 Enter, check them off, and delete them with the trash button.
 
-Create your own categories, such as Life, Money, or Work, using **Add category**
-or Enter. Each category appears as a card on the same page, with
-its own todo entry and scrollable list. Use a category's trash button to remove
-it; its todos move to **Uncategorized**, which also holds your existing todos
-and cannot be deleted. Categories and their todos are saved across restarts.
+Create categories, such as Life, Money, or Work, using **Add category** or Enter.
+Each category has its own todo entry and scrollable list. Use a todo's edit
+button to change its text. Deleting a category also deletes its todos after
+confirmation. Categories and todos are saved across restarts. Older unassigned
+todos, if any, are preserved in a regular **Recovered todos** category.
 
 On Windows, use the **Pin** button to keep Scrivi above other windows.
 **Settings** lets you choose whether Scrivi starts when you sign in. The startup
@@ -43,7 +43,12 @@ go run .
 ```
 
 A graphical desktop session is required. On macOS, install the Xcode command-line
-tools; on Windows, use a GCC toolchain such as MinGW-w64.
+tools; on Windows, use a GCC toolchain such as MinGW-w64. To embed the Windows
+executable icon when building locally, first run from the project root:
+
+```sh
+windres -i packaging/windows/icon.rc -o resource_windows_amd64.syso -O coff
+```
 
 ## Build
 

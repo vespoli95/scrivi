@@ -18,6 +18,7 @@ UninstallDisplayIcon={app}\scrivi.ico
 CloseApplications=yes
 RestartApplications=no
 SetupLogging=yes
+SetupIconFile={#IconPath}
 
 [Tasks]
 Name: desktopicon; Description: "Create a desktop shortcut"

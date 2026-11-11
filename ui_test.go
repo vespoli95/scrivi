@@ -88,9 +88,10 @@ func TestCategoryUI(t *testing.T) {
 		t.Helper()
 		return findUIObject(t, panel, func(entry *widget.Entry) bool { return true })
 	}
-	uncategorized := findPanel("Uncategorized")
-	draft := findTodoEntry(uncategorized)
-	draft.SetText("Keep this draft")
+	if len(db.listCategories()) != 0 {
+		t.Fatal("new database has a default category")
+	}
+	findUIObject(t, content, func(label *widget.Label) bool { return label.Text == "Create a category to get started." })
 	categoryEntry := findUIObject(t, content, func(entry *widget.Entry) bool {
 		return entry.PlaceHolder == "Category name (Life, Money, Work...)"
 	})
@@ -98,18 +99,20 @@ func TestCategoryUI(t *testing.T) {
 	test.Tap(findButton(content, "Emoji"))
 	test.Tap(findButton(w.Canvas().Overlays().Top(), "🏠"))
 	test.Tap(findButton(content, "Add category"))
-	if db.listCategories()[1].Icon != "🏠" || findButton(content, "Emoji") == nil {
+	if db.listCategories()[0].Icon != "🏠" || findButton(content, "Emoji") == nil {
 		t.Fatal("category emoji was not saved and reset")
 	}
+	life := findPanel("Life")
+	draft := findTodoEntry(life)
+	draft.SetText("Keep this draft")
 	categoryEntry.SetText("Work")
 	categoryEntry.OnSubmitted(categoryEntry.Text)
-	if len(db.listCategories()) != 3 || categoryEntry.Text != "" {
+	if len(db.listCategories()) != 2 || categoryEntry.Text != "" {
 		t.Fatal("category controls did not add and clear the input")
 	}
-	if draft.Text != "Keep this draft" || findPanel("Uncategorized") != uncategorized {
+	if draft.Text != "Keep this draft" || findPanel("Life") != life {
 		t.Fatal("adding a category discarded an existing panel's draft")
 	}
-	life := findPanel("Life")
 	work := findPanel("Work")
 	heading := findUIObject(t, life, func(label *widget.Label) bool { return label.Text == "🏠 Life" })
 	headingPosition := a.Driver().AbsolutePositionForObject(heading)
@@ -117,13 +120,13 @@ func TestCategoryUI(t *testing.T) {
 	if math.Abs(float64(headingPosition.X+heading.Size().Width/2-panelPosition.X-life.Size().Width/2)) > 0.01 {
 		t.Fatal("category heading is not centered in its panel")
 	}
-	if uncategorized.Size().Width <= 340 || uncategorized.Size().Height <= 240 {
+	if life.Size().Width <= 340 || life.Size().Height <= 240 {
 		t.Fatal("category panel does not stretch to fill the available window height")
 	}
 	findTodoEntry(life).SetText("Another draft")
 	test.Tap(findButton(life, "Icon"))
 	test.Tap(findButton(w.Canvas().Overlays().Top(), "⭐"))
-	if db.listCategories()[1].Icon != "⭐" || findTodoEntry(life).Text != "Another draft" {
+	if db.listCategories()[0].Icon != "⭐" || findTodoEntry(life).Text != "Another draft" {
 		t.Fatal("changing the category emoji lost its draft or did not save")
 	}
 	findUIObject(t, life, func(label *widget.Label) bool {
@@ -131,19 +134,19 @@ func TestCategoryUI(t *testing.T) {
 	})
 	test.Tap(findButton(life, "Icon"))
 	test.Tap(findButton(w.Canvas().Overlays().Top(), "Cancel"))
-	if db.listCategories()[1].Icon != "⭐" {
+	if db.listCategories()[0].Icon != "⭐" {
 		t.Fatal("canceling the emoji picker changed the category")
 	}
 	test.Tap(findButton(life, "Icon"))
 	test.Tap(findButton(w.Canvas().Overlays().Top(), "No icon"))
-	if db.listCategories()[1].Icon != "" {
+	if db.listCategories()[0].Icon != "" {
 		t.Fatal("category emoji could not be removed")
 	}
 	entry := findTodoEntry(work)
 	entry.SetText("Finish report")
 	test.Tap(findButton(work, "Add"))
 	item := db.list()[0]
-	if item.Title != "Finish report" || item.CategoryID != db.listCategories()[2].ID || entry.Text != "" {
+	if item.Title != "Finish report" || item.CategoryID != db.listCategories()[1].ID || entry.Text != "" {
 		t.Fatalf("todo was not added to Work: %+v", item)
 	}
 	title := findUIObject(t, work, func(title *todoTitleWidget) bool { return true })
@@ -151,25 +154,66 @@ func TestCategoryUI(t *testing.T) {
 	if !db.list()[0].Done {
 		t.Fatal("category todo could not be completed by tapping its title")
 	}
+	edit := findUIObject(t, work, func(button *pointerButton) bool {
+		return button.Icon != nil && button.Icon.Name() == theme.DocumentCreateIcon().Name()
+	})
+	test.Tap(edit)
+	editor := w.Canvas().Overlays().Top()
+	editEntry := findUIObject(t, editor, func(entry *widget.Entry) bool { return true })
+	if editEntry.Text != "Finish report" {
+		t.Fatal("editor did not show existing title")
+	}
+	editEntry.SetText(" ")
+	test.Tap(findButton(editor, "Save"))
+	if db.list()[0].Title != "Finish report" {
+		t.Fatal("blank title was saved")
+	}
+	test.Tap(findButton(w.Canvas().Overlays().Top(), "OK"))
+	editEntry.SetText("Finish presentation")
+	if _, err := db.disk.Exec(`CREATE TRIGGER prevent_edit BEFORE UPDATE OF title ON todos
+		BEGIN SELECT RAISE(ABORT, 'update blocked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	test.Tap(findButton(editor, "Save"))
+	if db.list()[0].Title != "Finish report" || editEntry.Text != "Finish presentation" {
+		t.Fatal("failed edit changed the todo or lost the draft")
+	}
+	test.Tap(findButton(w.Canvas().Overlays().Top(), "OK"))
+	if _, err := db.disk.Exec("DROP TRIGGER prevent_edit"); err != nil {
+		t.Fatal(err)
+	}
+	editEntry.OnSubmitted(editEntry.Text)
+	if db.list()[0].Title != "Finish presentation" || !db.list()[0].Done {
+		t.Fatal("editing did not preserve completion")
+	}
+	edit = findUIObject(t, work, func(button *pointerButton) bool {
+		return button.Icon != nil && button.Icon.Name() == theme.DocumentCreateIcon().Name()
+	})
+	test.Tap(edit)
+	editor = w.Canvas().Overlays().Top()
+	editEntry = findUIObject(t, editor, func(entry *widget.Entry) bool { return true })
+	editEntry.SetText("Canceled edit")
+	test.Tap(findButton(editor, "Cancel"))
+	if db.list()[0].Title != "Finish presentation" {
+		t.Fatal("canceling an edit changed the todo")
+	}
 	findTodoEntry(life).SetText("Another draft")
 	workHeader := work.Content.(*fyne.Container).Objects[1]
 	test.Tap(findButton(workHeader, ""))
+	findUIObject(t, w.Canvas().Overlays().Top(), func(label *widget.Label) bool {
+		return strings.Contains(label.Text, "all its todos")
+	})
 	test.Tap(findButton(w.Canvas().Overlays().Top(), "No"))
-	if len(db.listCategories()) != 3 {
+	if len(db.listCategories()) != 2 || len(db.list()) != 1 {
 		t.Fatal("canceling category deletion removed the category")
 	}
 	test.Tap(findButton(workHeader, ""))
 	test.Tap(findButton(w.Canvas().Overlays().Top(), "Yes"))
-	if len(db.listCategories()) != 2 || db.list()[0].CategoryID != 0 || !db.list()[0].Done {
-		t.Fatal("category deletion did not preserve and move its todo")
+	if len(db.listCategories()) != 1 || len(db.list()) != 0 {
+		t.Fatal("category deletion did not delete its todo")
 	}
-	findUIObject(t, uncategorized, func(text *canvas.Text) bool { return text.Text == "Finish report" })
-	if draft.Text != "Keep this draft" || findTodoEntry(life).Text != "Another draft" {
+	if findTodoEntry(life).Text != "Another draft" {
 		t.Fatal("deleting a category discarded another panel's draft")
-	}
-	test.Tap(findButton(uncategorized, ""))
-	if len(db.list()) != 0 {
-		t.Fatal("moved todo could not be deleted")
 	}
 }
 

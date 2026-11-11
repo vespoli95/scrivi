@@ -71,6 +71,9 @@ func (db *memoryDB) load() error {
 	if err := db.migrateCategoryIcons(); err != nil {
 		return err
 	}
+	if err := db.recoverUncategorized(); err != nil {
+		return err
+	}
 	if err := db.loadCategories(); err != nil {
 		return err
 	}
@@ -141,23 +144,15 @@ func (db *memoryDB) close() error {
 	return db.disk.Close()
 }
 
-func (db *memoryDB) add(title string) error {
-	return db.addInCategory(title, 0)
-}
-
 func (db *memoryDB) addInCategory(title string, categoryID int) error {
 	title = strings.TrimSpace(title)
 	if title == "" {
 		return errors.New("enter a todo first")
 	}
-	var savedCategory sql.NullInt64
-	if categoryID != 0 {
-		if _, ok := db.categories[categoryID]; !ok {
-			return errCategoryNotFound
-		}
-		savedCategory = sql.NullInt64{Int64: int64(categoryID), Valid: true}
+	if _, ok := db.categories[categoryID]; !ok {
+		return errCategoryNotFound
 	}
-	result, err := db.disk.Exec("INSERT INTO todos (title, category_id) VALUES (?, ?)", title, savedCategory)
+	result, err := db.disk.Exec("INSERT INTO todos (title, category_id) VALUES (?, ?)", title, categoryID)
 	if err != nil {
 		return fmt.Errorf("save todo: %w", err)
 	}
@@ -224,6 +219,46 @@ func (db *memoryDB) migrateCategoryIcons() error {
 	return nil
 }
 
+func (db *memoryDB) recoverUncategorized() error {
+	var count int
+	if err := db.disk.QueryRow("SELECT COUNT(*) FROM todos WHERE category_id IS NULL").Scan(&count); err != nil {
+		return fmt.Errorf("check uncategorized todos: %w", err)
+	}
+	if count == 0 {
+		return nil
+	}
+	tx, err := db.disk.Begin()
+	if err != nil {
+		return fmt.Errorf("begin todo recovery: %w", err)
+	}
+	name := "Recovered todos"
+	for suffix := 2; ; suffix++ {
+		var exists bool
+		if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM categories WHERE name = ? COLLATE NOCASE)", name).Scan(&exists); err != nil {
+			return errors.Join(fmt.Errorf("find recovery category: %w", err), tx.Rollback())
+		}
+		if !exists {
+			break
+		}
+		name = fmt.Sprintf("Recovered todos %d", suffix)
+	}
+	result, err := tx.Exec("INSERT INTO categories (name) VALUES (?)", name)
+	if err != nil {
+		return errors.Join(fmt.Errorf("create recovery category: %w", err), tx.Rollback())
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return errors.Join(fmt.Errorf("get recovery category ID: %w", err), tx.Rollback())
+	}
+	if _, err := tx.Exec("UPDATE todos SET category_id = ? WHERE category_id IS NULL", id); err != nil {
+		return errors.Join(fmt.Errorf("recover uncategorized todos: %w", err), tx.Rollback())
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("save recovered todos: %w", err)
+	}
+	return nil
+}
+
 func (db *memoryDB) setCategoryIcon(id int, icon string) error {
 	item, ok := db.categories[id]
 	if !ok {
@@ -261,8 +296,7 @@ func validCategoryIcon(icon string) bool {
 }
 
 func (db *memoryDB) listCategories() []category {
-	items := make([]category, 0, len(db.categories)+1)
-	items = append(items, category{ID: 0, Name: "Uncategorized"})
+	items := make([]category, 0, len(db.categories))
 	for _, item := range db.categories {
 		items = append(items, item)
 	}
@@ -280,8 +314,8 @@ func (db *memoryDB) deleteCategory(id int) error {
 	if err != nil {
 		return fmt.Errorf("begin category deletion: %w", err)
 	}
-	if _, err := tx.Exec("UPDATE todos SET category_id = NULL WHERE category_id = ?", id); err != nil {
-		return errors.Join(fmt.Errorf("move category todos: %w", err), tx.Rollback())
+	if _, err := tx.Exec("DELETE FROM todos WHERE category_id = ?", id); err != nil {
+		return errors.Join(fmt.Errorf("delete category todos: %w", err), tx.Rollback())
 	}
 	if _, err := tx.Exec("DELETE FROM categories WHERE id = ?", id); err != nil {
 		return errors.Join(fmt.Errorf("delete category: %w", err), tx.Rollback())
@@ -292,10 +326,26 @@ func (db *memoryDB) deleteCategory(id int) error {
 	delete(db.categories, id)
 	for todoID, item := range db.todos {
 		if item.CategoryID == id {
-			item.CategoryID = 0
-			db.todos[todoID] = item
+			delete(db.todos, todoID)
 		}
 	}
+	return nil
+}
+
+func (db *memoryDB) setTitle(id int, title string) error {
+	item, ok := db.todos[id]
+	if !ok {
+		return errTodoNotFound
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return errors.New("enter a todo first")
+	}
+	if _, err := db.disk.Exec("UPDATE todos SET title = ? WHERE id = ?", title, id); err != nil {
+		return fmt.Errorf("save todo title: %w", err)
+	}
+	item.Title = title
+	db.todos[id] = item
 	return nil
 }
 

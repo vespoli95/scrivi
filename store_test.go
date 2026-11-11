@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestCategoriesPersistAndDeleteWithoutLosingTodos(t *testing.T) {
+func TestCategoriesPersistAndDeleteTheirTodos(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "todos.sqlite")
 	db, err := openMemoryDB(path)
 	if err != nil {
@@ -22,7 +22,7 @@ func TestCategoriesPersistAndDeleteWithoutLosingTodos(t *testing.T) {
 		}
 	}
 	groups := db.listCategories()
-	if len(groups) != 4 || groups[0].Name != "Uncategorized" || groups[1].Name != "Life" {
+	if len(groups) != 3 || groups[0].Name != "Life" {
 		t.Fatalf("unexpected categories: %+v", groups)
 	}
 	for i, group := range groups {
@@ -47,18 +47,18 @@ func TestCategoriesPersistAndDeleteWithoutLosingTodos(t *testing.T) {
 	if err := reopened.close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.deleteCategory(groups[1].ID); err != nil {
+	if err := db.deleteCategory(groups[0].ID); err != nil {
 		t.Fatal(err)
 	}
-	if len(db.listCategories()) != 3 {
+	if len(db.listCategories()) != 2 {
 		t.Fatal("category was not removed")
 	}
 	items = db.list()
-	if len(items) != 4 || items[1].CategoryID != 0 || !items[1].Done || items[1].Title != "Life task" {
-		t.Fatalf("category deletion lost todo data: %+v", items)
+	if len(items) != 2 || items[0].Title != "Money task" || !items[0].Done {
+		t.Fatalf("category deletion did not delete only its todos: %+v", items)
 	}
-	if items[2].CategoryID != groups[2].ID || items[3].CategoryID != groups[3].ID {
-		t.Fatal("deletion moved another category's todos")
+	if items[0].CategoryID != groups[1].ID || items[1].CategoryID != groups[2].ID {
+		t.Fatal("deletion changed another category's todos")
 	}
 	reopened, err = openMemoryDB(path)
 	if err != nil {
@@ -75,7 +75,7 @@ func TestInvalidCategoryOperations(t *testing.T) {
 	if err := db.addCategory("Work"); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"", " \t\n ", " work ", "UNCATEGORIZED"} {
+	for _, name := range []string{"", " \t\n ", " work "} {
 		if err := db.addCategory(name); err == nil {
 			t.Errorf("accepted invalid category %q", name)
 		}
@@ -88,7 +88,10 @@ func TestInvalidCategoryOperations(t *testing.T) {
 	if err := db.addInCategory("Task", 42); !errors.Is(err, errCategoryNotFound) {
 		t.Fatalf("unexpected category assignment error: %v", err)
 	}
-	if len(db.listCategories()) != 2 || len(db.list()) != 0 {
+	if err := db.addInCategory("Task", 0); !errors.Is(err, errCategoryNotFound) {
+		t.Fatalf("accepted uncategorized todo: %v", err)
+	}
+	if len(db.listCategories()) != 1 || len(db.list()) != 0 {
 		t.Fatal("invalid operations changed stored data")
 	}
 }
@@ -103,7 +106,7 @@ func TestCategoryIconsPersistAndPreserveCacheOnFailure(t *testing.T) {
 	if err := db.addCategoryWithIcon("Life", "🏠"); err != nil {
 		t.Fatal(err)
 	}
-	id := db.listCategories()[1].ID
+	id := db.listCategories()[0].ID
 	checkPersisted := func(icon string) {
 		t.Helper()
 		reopened, err := openMemoryDB(path)
@@ -183,7 +186,7 @@ func TestCategoryDeletionRollsBackOnFailure(t *testing.T) {
 	if err := db.addCategory("Work"); err != nil {
 		t.Fatal(err)
 	}
-	id := db.listCategories()[1].ID
+	id := db.listCategories()[0].ID
 	if err := db.addInCategory("Keep", id); err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +206,7 @@ func TestCategoryDeletionRollsBackOnFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	if savedCategory != id {
-		t.Fatal("failed category deletion moved todos on disk")
+		t.Fatal("failed category deletion changed todos on disk")
 	}
 	if err := db.close(); err != nil {
 		t.Fatal(err)
@@ -219,7 +222,7 @@ func TestCategoryDeletionRollsBackOnFailure(t *testing.T) {
 	}
 }
 
-func TestExistingTodosMigrateToUncategorized(t *testing.T) {
+func TestExistingTodosMigrateToRecoveryCategory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "todos.sqlite")
 	legacy, err := sql.Open("sqlite3", path)
 	if err != nil {
@@ -242,7 +245,11 @@ func TestExistingTodosMigrateToUncategorized(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.close()
-	expected := []todo{{ID: 1, Title: "Keep"}, {ID: 2, Title: "Complete", Done: true}}
+	groups := db.listCategories()
+	if len(groups) != 1 || groups[0].Name != "Recovered todos" {
+		t.Fatalf("missing recovery category: %+v", groups)
+	}
+	expected := []todo{{ID: 1, Title: "Keep", CategoryID: groups[0].ID}, {ID: 2, Title: "Complete", Done: true, CategoryID: groups[0].ID}}
 	if !reflect.DeepEqual(db.list(), expected) {
 		t.Fatalf("migration changed existing todos: %+v", db.list())
 	}
@@ -262,6 +269,129 @@ func TestExistingTodosMigrateToUncategorized(t *testing.T) {
 	}
 }
 
+func TestRecoveryAvoidsExistingCategoryNames(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "todos.sqlite")
+	db, err := openMemoryDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.addCategory("Recovered todos"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.disk.Exec("INSERT INTO todos (title) VALUES ('Legacy')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = openMemoryDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.close()
+	groups := db.listCategories()
+	if len(groups) != 2 || groups[1].Name != "Recovered todos 2" || db.list()[0].CategoryID != groups[1].ID {
+		t.Fatalf("recovery merged or lost data: categories=%+v todos=%+v", groups, db.list())
+	}
+}
+
+func TestRecoveryRollsBackOnFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "todos.sqlite")
+	db, err := openMemoryDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.disk.Exec(`INSERT INTO todos (title) VALUES ('Legacy');
+		CREATE TRIGGER prevent_recovery BEFORE UPDATE OF category_id ON todos
+		BEGIN SELECT RAISE(ABORT, 'recovery blocked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.close(); err != nil {
+		t.Fatal(err)
+	}
+	if db, err := openMemoryDB(path); err == nil {
+		db.close()
+		t.Fatal("expected recovery to fail")
+	}
+	disk, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer disk.Close()
+	var categories, unassigned int
+	if err := disk.QueryRow("SELECT COUNT(*) FROM categories").Scan(&categories); err != nil {
+		t.Fatal(err)
+	}
+	if err := disk.QueryRow("SELECT COUNT(*) FROM todos WHERE category_id IS NULL").Scan(&unassigned); err != nil {
+		t.Fatal(err)
+	}
+	if categories != 0 || unassigned != 1 {
+		t.Fatal("failed recovery did not roll back")
+	}
+}
+
+func TestEditTodoPersistsAndPreservesStateOnFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "todos.sqlite")
+	db, err := openMemoryDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.close()
+	if err := addTestTodo(db, "Original"); err != nil {
+		t.Fatal(err)
+	}
+	id := db.list()[0].ID
+	if err := db.setDone(id, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.setTitle(id, "  Edited  "); err != nil {
+		t.Fatal(err)
+	}
+	expected := db.list()
+	if expected[0].Title != "Edited" || !expected[0].Done {
+		t.Fatalf("edit changed the wrong fields: %+v", expected[0])
+	}
+	reopened, err := openMemoryDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.close()
+	if !reflect.DeepEqual(reopened.list(), expected) {
+		t.Fatal("edited title was not persisted")
+	}
+	if err := db.setTitle(id, " \t "); err == nil {
+		t.Fatal("accepted a blank title")
+	}
+	if err := db.setTitle(42, "Missing"); !errors.Is(err, errTodoNotFound) {
+		t.Fatalf("unexpected missing todo error: %v", err)
+	}
+	if _, err := db.disk.Exec(`CREATE TRIGGER prevent_title_update BEFORE UPDATE OF title ON todos
+		BEGIN SELECT RAISE(ABORT, 'update blocked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.setTitle(id, "Unsaved"); err == nil {
+		t.Fatal("expected a title write error")
+	}
+	var savedTitle string
+	if err := reopened.disk.QueryRow("SELECT title FROM todos WHERE id = ?", id).Scan(&savedTitle); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(db.list(), expected) || savedTitle != expected[0].Title {
+		t.Fatal("failed edit changed memory or disk")
+	}
+}
+
+func addTestTodo(db *memoryDB, title string) error {
+	groups := db.listCategories()
+	if len(groups) == 0 {
+		if err := db.addCategory("Test"); err != nil {
+			return err
+		}
+		groups = db.listCategories()
+	}
+	return db.addInCategory(title, groups[0].ID)
+}
+
 func newTestDB(t *testing.T) *memoryDB {
 	t.Helper()
 	db, err := openMemoryDB(":memory:")
@@ -278,10 +408,10 @@ func newTestDB(t *testing.T) *memoryDB {
 
 func TestTodoLifecycle(t *testing.T) {
 	db := newTestDB(t)
-	if err := db.add("  Buy milk  "); err != nil {
+	if err := addTestTodo(db, "  Buy milk  "); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.add("Read a book"); err != nil {
+	if err := addTestTodo(db, "Read a book"); err != nil {
 		t.Fatal(err)
 	}
 	items := db.list()
@@ -310,7 +440,7 @@ func TestTodoLifecycle(t *testing.T) {
 	if remaining := db.list(); len(remaining) != 1 || remaining[0].Title != "Read a book" {
 		t.Fatalf("unexpected todos after deletion: %+v", remaining)
 	}
-	if err := db.add("Third todo"); err != nil {
+	if err := addTestTodo(db, "Third todo"); err != nil {
 		t.Fatal(err)
 	}
 	if db.list()[1].ID <= items[1].ID {
@@ -324,7 +454,7 @@ func TestTodoLifecycle(t *testing.T) {
 func TestInvalidOperations(t *testing.T) {
 	db := newTestDB(t)
 	for _, title := range []string{"", " \t\n "} {
-		if err := db.add(title); err == nil {
+		if err := addTestTodo(db, title); err == nil {
 			t.Errorf("accepted blank title %q", title)
 		}
 	}
@@ -341,7 +471,7 @@ func TestInvalidOperations(t *testing.T) {
 
 func TestListReturnsCopies(t *testing.T) {
 	db := newTestDB(t)
-	if err := db.add("Original"); err != nil {
+	if err := addTestTodo(db, "Original"); err != nil {
 		t.Fatal(err)
 	}
 	items := db.list()
@@ -363,7 +493,7 @@ func TestPersistence(t *testing.T) {
 		}
 	}()
 	for _, title := range []string{"Keep", "Complete", "Delete"} {
-		if err := db.add(title); err != nil {
+		if err := addTestTodo(db, title); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -398,7 +528,7 @@ func TestPersistence(t *testing.T) {
 	if actual := reopened.list(); !reflect.DeepEqual(actual, expected) {
 		t.Fatalf("after restart loaded %+v, want %+v", actual, expected)
 	}
-	if err := reopened.add("New"); err != nil {
+	if err := addTestTodo(reopened, "New"); err != nil {
 		t.Fatal(err)
 	}
 	if latest := reopened.list()[2]; latest.ID <= items[2].ID {
@@ -408,7 +538,7 @@ func TestPersistence(t *testing.T) {
 
 func TestFailedWritesPreserveMemory(t *testing.T) {
 	db := newTestDB(t)
-	if err := db.add("Keep"); err != nil {
+	if err := addTestTodo(db, "Keep"); err != nil {
 		t.Fatal(err)
 	}
 	expected := db.list()
@@ -416,7 +546,7 @@ func TestFailedWritesPreserveMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, operation := range map[string]func() error{
-		"add":      func() error { return db.add("Unsaved") },
+		"add":      func() error { return addTestTodo(db, "Unsaved") },
 		"complete": func() error { return db.setDone(expected[0].ID, true) },
 		"delete":   func() error { return db.delete(expected[0].ID) },
 	} {

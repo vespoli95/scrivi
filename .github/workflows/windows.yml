@@ -91,6 +91,8 @@ jobs:
           BUILD_VERSION: ${{ needs.version.outputs.version }}
           BUILD_REPOSITORY: ${{ github.repository }}
         run: |
+          windres -i packaging/windows/icon.rc -o resource_windows_amd64.syso -O coff
+          if ($LASTEXITCODE -ne 0) { throw 'Icon resource compilation failed.' }
           go test -tags ci ./...
           if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
           go vet ./...

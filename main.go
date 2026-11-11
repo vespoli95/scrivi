@@ -16,6 +16,7 @@ var appIconData []byte
 
 func main() {
 	a := app.New()
+	a.Settings().SetTheme(pastelTheme{})
 	icon := fyne.NewStaticResource("scrivi.svg", appIconData)
 	a.SetIcon(icon)
 	w := a.NewWindow("Scrivi")

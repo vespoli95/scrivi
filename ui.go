@@ -191,6 +191,28 @@ func showCategoryEmojiPicker(w fyne.Window, selected string, onSelected func(str
 	d.Show()
 }
 
+func showTodoEditor(w fyne.Window, db *memoryDB, item todo, refresh func()) {
+	entry := widget.NewEntry()
+	entry.SetText(item.Title)
+	d := dialog.NewCustomWithoutButtons("Edit todo", entry, w)
+	save := func() {
+		if err := db.setTitle(item.ID, entry.Text); err != nil {
+			showError(err, w)
+			return
+		}
+		d.Hide()
+		refresh()
+	}
+	entry.OnSubmitted = func(string) { save() }
+	saveButton := newPointerButton("Save", theme.ConfirmIcon(), save)
+	saveButton.Importance = widget.HighImportance
+	d.SetButtons([]fyne.CanvasObject{
+		newPointerButton("Cancel", theme.CancelIcon(), d.Hide), saveButton,
+	})
+	d.Show()
+	w.Canvas().Focus(entry)
+}
+
 type categoryGridLayout struct {
 	cellSize fyne.Size
 	rows     int
@@ -254,7 +276,7 @@ func newCategorySurface() *categorySurface {
 }
 
 func (s *categorySurface) CreateRenderer() fyne.WidgetRenderer {
-	background := canvas.NewRectangle(theme.ColorForWidget(theme.ColorNameInputBackground, s))
+	background := canvas.NewRectangle(theme.ColorForWidget(theme.ColorNameHeaderBackground, s))
 	background.CornerRadius = theme.InputRadiusSize() * 2
 	return &categorySurfaceRenderer{WidgetRenderer: widget.NewSimpleRenderer(background), surface: s, background: background}
 }
@@ -266,7 +288,7 @@ type categorySurfaceRenderer struct {
 }
 
 func (r *categorySurfaceRenderer) Refresh() {
-	r.background.FillColor = theme.ColorForWidget(theme.ColorNameInputBackground, r.surface)
+	r.background.FillColor = theme.ColorForWidget(theme.ColorNameHeaderBackground, r.surface)
 	r.background.CornerRadius = theme.InputRadiusSize() * 2
 	r.WidgetRenderer.Refresh()
 }
@@ -299,6 +321,10 @@ func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete 
 			title := newTodoTitle(item.Title, item.Done, func() {
 				check.SetChecked(!check.Checked)
 			})
+			edit := newPointerButton("", theme.DocumentCreateIcon(), func() {
+				showTodoEditor(w, db, item, refresh)
+			})
+			edit.Importance = widget.LowImportance
 			remove := newPointerButton("", theme.DeleteIcon(), func() {
 				if err := db.delete(item.ID); err != nil {
 					showError(err, w)
@@ -307,7 +333,7 @@ func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete 
 				refresh()
 			})
 			remove.Importance = widget.LowImportance
-			rows.Add(container.NewBorder(nil, nil, check, remove, title))
+			rows.Add(container.NewBorder(nil, nil, check, container.NewHBox(edit, remove), title))
 		}
 		if count == 0 {
 			empty := widget.NewLabel("No todos yet. Add one above.")
@@ -328,30 +354,23 @@ func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete 
 	entry.OnSubmitted = func(string) { add() }
 	addButton := newPointerButton("Add", theme.ContentAddIcon(), add)
 	addButton.Importance = widget.HighImportance
-	var remove fyne.CanvasObject
-	var iconButton *pointerButton
 	name := widget.NewLabelWithStyle(group.Name, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
-	if group.ID != 0 {
-		deleteButton := newPointerButton("", theme.DeleteIcon(), onDelete)
-		deleteButton.Importance = widget.LowImportance
-		remove = deleteButton
-		iconButton = newPointerButton("Icon", nil, func() {
-			showCategoryEmojiPicker(w, db.categories[group.ID].Icon, func(icon string) {
-				if err := db.setCategoryIcon(group.ID, icon); err != nil {
-					showError(err, w)
-					return
-				}
-				refresh()
-			})
+	deleteButton := newPointerButton("", theme.DeleteIcon(), onDelete)
+	deleteButton.Importance = widget.LowImportance
+	iconButton := newPointerButton("Icon", nil, func() {
+		showCategoryEmojiPicker(w, db.categories[group.ID].Icon, func(icon string) {
+			if err := db.setCategoryIcon(group.ID, icon); err != nil {
+				showError(err, w)
+				return
+			}
+			refresh()
 		})
-		iconButton.Importance = widget.LowImportance
-	}
+	})
+	iconButton.Importance = widget.LowImportance
 	name.Truncation = fyne.TextTruncateEllipsis
 	refreshRows := refresh
 	refresh = func() {
-		if group.ID != 0 {
-			group = db.categories[group.ID]
-		}
+		group = db.categories[group.ID]
 		title := group.Name
 		if group.Icon != "" {
 			title = group.Icon + " " + title
@@ -360,13 +379,10 @@ func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete 
 		refreshRows()
 	}
 	// Equal-width title-bar controls keep the category name centered.
-	titleBar := container.NewPadded(name)
-	if iconButton != nil {
-		controlSize := iconButton.MinSize().Max(remove.MinSize())
-		titleBar = container.NewBorder(nil, nil,
-			container.NewGridWrap(controlSize, iconButton),
-			container.NewGridWrap(controlSize, remove), name)
-	}
+	controlSize := iconButton.MinSize().Max(deleteButton.MinSize())
+	titleBar := container.NewBorder(nil, nil,
+		container.NewGridWrap(controlSize, iconButton),
+		container.NewGridWrap(controlSize, deleteButton), name)
 	header := container.NewVBox(
 		titleBar,
 		widget.NewSeparator(),
@@ -390,18 +406,19 @@ func todoUI(w fyne.Window, db *memoryDB) fyne.CanvasObject {
 	refresh = func() {
 		panels.RemoveAll()
 		for id := range categoryPanels {
-			if id != 0 {
-				if _, exists := db.categories[id]; !exists {
-					delete(categoryPanels, id)
-				}
+			if _, exists := db.categories[id]; !exists {
+				delete(categoryPanels, id)
 			}
+		}
+		if len(db.categories) == 0 {
+			panels.Add(container.NewCenter(widget.NewLabel("Create a category to get started.")))
 		}
 		for _, group := range db.listCategories() {
 			panel, exists := categoryPanels[group.ID]
 			if !exists {
 				panel = newTodoCategoryPanel(w, db, group, func() {
 					showConfirm("Delete category?",
-						"Delete "+group.Name+"? Its todos will move to Uncategorized.", func(confirmed bool) {
+						"Delete "+group.Name+" and all its todos? This cannot be undone.", func(confirmed bool) {
 							if !confirmed {
 								return
 							}
