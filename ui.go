@@ -97,6 +97,49 @@ type pointerCheck struct {
 	widget.Check
 }
 
+type multilineEntry struct {
+	widget.Entry
+	shiftDown bool
+}
+
+func newMultilineEntry() *multilineEntry {
+	entry := &multilineEntry{Entry: *widget.NewMultiLineEntry()}
+	entry.SetMinRowsVisible(2)
+	entry.ExtendBaseWidget(entry)
+	return entry
+}
+
+func (e *multilineEntry) KeyDown(key *fyne.KeyEvent) {
+	if key.Name == desktop.KeyShiftLeft || key.Name == desktop.KeyShiftRight {
+		e.shiftDown = true
+	}
+	e.Entry.KeyDown(key)
+}
+
+func (e *multilineEntry) KeyUp(key *fyne.KeyEvent) {
+	if key.Name == desktop.KeyShiftLeft || key.Name == desktop.KeyShiftRight {
+		e.shiftDown = false
+	}
+	e.Entry.KeyUp(key)
+}
+
+func (e *multilineEntry) TypedKey(key *fyne.KeyEvent) {
+	if key.Name == fyne.KeyReturn || key.Name == fyne.KeyEnter {
+		if !e.shiftDown {
+			if e.OnSubmitted != nil {
+				e.OnSubmitted(e.Text)
+			}
+			return
+		}
+
+		e.Entry.KeyUp(&fyne.KeyEvent{Name: desktop.KeyShiftLeft})
+		e.Entry.TypedKey(key)
+		e.Entry.KeyDown(&fyne.KeyEvent{Name: desktop.KeyShiftLeft})
+		return
+	}
+	e.Entry.TypedKey(key)
+}
+
 func newPointerCheck() *pointerCheck {
 	check := &pointerCheck{}
 	check.ExtendBaseWidget(check)
@@ -183,7 +226,7 @@ func showCategoryColorPicker(w fyne.Window, selected string, onSelected func(str
 }
 
 func showTodoEditor(w fyne.Window, db *memoryDB, item todo, refresh func()) {
-	entry := widget.NewEntry()
+	entry := newMultilineEntry()
 	entry.SetText(item.Title)
 	d := dialog.NewCustomWithoutButtons("Edit todo", entry, w)
 	d.Resize(fyne.NewSize(600, 320))
@@ -319,7 +362,7 @@ func (r *categorySurfaceRenderer) Refresh() {
 }
 
 func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete func(), drag *dragController) *todoCategoryPanel {
-	entry := widget.NewEntry()
+	entry := newMultilineEntry()
 	entry.SetPlaceHolder("What needs doing?")
 	rowsLayout := &todoRowsLayout{width: 340}
 	rows := container.New(rowsLayout)

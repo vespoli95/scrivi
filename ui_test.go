@@ -50,6 +50,27 @@ func findUIObject[T fyne.CanvasObject](t *testing.T, root fyne.CanvasObject, mat
 	return found
 }
 
+func TestMultilineEntryShiftEnterAddsNewline(t *testing.T) {
+	entry := newMultilineEntry()
+	var submitted string
+	entry.OnSubmitted = func(text string) { submitted = text }
+	entry.SetText("first")
+	entry.CursorColumn = len(entry.Text)
+
+	entry.KeyDown(&fyne.KeyEvent{Name: desktop.KeyShiftLeft})
+	entry.TypedKey(&fyne.KeyEvent{Name: fyne.KeyReturn})
+	entry.KeyUp(&fyne.KeyEvent{Name: desktop.KeyShiftLeft})
+	entry.TypedRune('s')
+	if entry.Text != "first\ns" {
+		t.Fatalf("Shift+Enter did not insert a newline: %q", entry.Text)
+	}
+
+	entry.TypedKey(&fyne.KeyEvent{Name: fyne.KeyReturn})
+	if submitted != "first\ns" {
+		t.Fatalf("Enter submitted %q, want %q", submitted, "first\ns")
+	}
+}
+
 func TestCategoryUI(t *testing.T) {
 	a := test.NewApp()
 	defer a.Quit()
@@ -90,9 +111,9 @@ func TestCategoryUI(t *testing.T) {
 			return containsName(header.Objects[0])
 		})
 	}
-	findTodoEntry := func(panel *widget.Card) *widget.Entry {
+	findTodoEntry := func(panel *widget.Card) *multilineEntry {
 		t.Helper()
-		return findUIObject(t, panel, func(entry *widget.Entry) bool { return true })
+		return findUIObject(t, panel, func(entry *multilineEntry) bool { return true })
 	}
 	if len(db.listCategories()) != 0 {
 		t.Fatal("new database has a default category")
@@ -190,7 +211,7 @@ func TestCategoryUI(t *testing.T) {
 	if editor.Size().Width < 600 || editor.Size().Height < 320 {
 		t.Fatalf("edit dialog is too small: %v", editor.Size())
 	}
-	editEntry := findUIObject(t, editor, func(entry *widget.Entry) bool { return true })
+	editEntry := findUIObject(t, editor, func(entry *multilineEntry) bool { return true })
 	if editEntry.Text != "Finish report" {
 		t.Fatal("editor did not show existing title")
 	}
@@ -222,7 +243,7 @@ func TestCategoryUI(t *testing.T) {
 	})
 	test.Tap(edit)
 	editor = w.Canvas().Overlays().Top()
-	editEntry = findUIObject(t, editor, func(entry *widget.Entry) bool { return true })
+	editEntry = findUIObject(t, editor, func(entry *multilineEntry) bool { return true })
 	editEntry.SetText("Canceled edit")
 	test.Tap(findButton(editor, "Cancel"))
 	if db.list()[0].Title != "Finish presentation" {
