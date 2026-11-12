@@ -1,4 +1,4 @@
-# Scrivi
+# Scrivi app
 
 A tiny Go desktop todo list built with Fyne. Add todos with the Add button or
 Enter, check them off, and delete them with the trash button.
