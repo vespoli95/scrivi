@@ -187,6 +187,9 @@ func TestCategoryUI(t *testing.T) {
 	})
 	test.Tap(edit)
 	editor := w.Canvas().Overlays().Top()
+	if editor.Size().Width < 600 || editor.Size().Height < 320 {
+		t.Fatalf("edit dialog is too small: %v", editor.Size())
+	}
 	editEntry := findUIObject(t, editor, func(entry *widget.Entry) bool { return true })
 	if editEntry.Text != "Finish report" {
 		t.Fatal("editor did not show existing title")

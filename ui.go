@@ -186,6 +186,7 @@ func showTodoEditor(w fyne.Window, db *memoryDB, item todo, refresh func()) {
 	entry := widget.NewEntry()
 	entry.SetText(item.Title)
 	d := dialog.NewCustomWithoutButtons("Edit todo", entry, w)
+	d.Resize(fyne.NewSize(600, 320))
 	save := func() {
 		if err := db.setTitle(item.ID, entry.Text); err != nil {
 			showError(err, w)
