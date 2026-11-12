@@ -14,6 +14,72 @@ type pointerButton struct {
 	widget.Button
 }
 
+type categoryEmojiButton struct {
+	widget.BaseWidget
+	emoji      string
+	selected   bool
+	onTapped   func()
+	label      *canvas.Text
+	background *canvas.Rectangle
+	content    *fyne.Container
+	size       fyne.Size
+}
+
+func newCategoryEmojiButton(emoji string, selected bool, size fyne.Size, tapped func()) *categoryEmojiButton {
+	display := emoji
+	if display == "" {
+		display = "+"
+	}
+	background := canvas.NewRectangle(theme.ButtonColor())
+	background.CornerRadius = theme.InputRadiusSize()
+	label := canvas.NewText(display, theme.ForegroundColor())
+	label.TextSize = 28
+	label.Alignment = fyne.TextAlignCenter
+	button := &categoryEmojiButton{
+		emoji: emoji, selected: selected, onTapped: tapped, label: label,
+		background: background, content: container.NewStack(background, container.NewCenter(label)), size: size,
+	}
+	button.ExtendBaseWidget(button)
+	button.updateStyle()
+	return button
+}
+
+func (b *categoryEmojiButton) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(b.content)
+}
+
+func (b *categoryEmojiButton) MinSize() fyne.Size { return b.size }
+
+func (b *categoryEmojiButton) SetEmoji(emoji string) {
+	b.emoji = emoji
+	if emoji == "" {
+		b.label.Text = "+"
+	} else {
+		b.label.Text = emoji
+	}
+	b.Refresh()
+}
+
+func (b *categoryEmojiButton) updateStyle() {
+	if b.selected {
+		b.background.FillColor = theme.PrimaryColor()
+		b.label.Color = theme.Color(theme.ColorNameForegroundOnPrimary)
+	} else {
+		b.background.FillColor = theme.ButtonColor()
+		b.label.Color = theme.ForegroundColor()
+	}
+	b.background.Refresh()
+	b.label.Refresh()
+}
+
+func (b *categoryEmojiButton) Refresh() {
+	b.updateStyle()
+	b.BaseWidget.Refresh()
+}
+
+func (b *categoryEmojiButton) Tapped(*fyne.PointEvent) { b.onTapped() }
+func (b *categoryEmojiButton) Cursor() desktop.Cursor  { return desktop.PointerCursor }
+
 func newPointerButton(text string, icon fyne.Resource, tapped func()) *pointerButton {
 	button := &pointerButton{Button: widget.Button{Text: text, Icon: icon, OnTapped: tapped}}
 	button.ExtendBaseWidget(button)
@@ -78,13 +144,11 @@ func showCategoryEmojiPicker(w fyne.Window, selected string, onSelected func(str
 	choices := container.NewGridWithColumns(6)
 	d := dialog.NewCustomWithoutButtons("Category emoji", choices, w)
 	for _, emoji := range categoryEmojis {
-		button := newPointerButton(emoji, nil, func() {
+		value := emoji
+		button := newCategoryEmojiButton(emoji, emoji == selected, fyne.NewSize(48, 48), func() {
 			d.Hide()
-			onSelected(emoji)
+			onSelected(value)
 		})
-		if emoji == selected {
-			button.Importance = widget.HighImportance
-		}
 		choices.Add(button)
 	}
 	d.SetButtons([]fyne.CanvasObject{
@@ -147,7 +211,7 @@ type categoryGridLayout struct {
 }
 
 type categoryHeadingLayout struct {
-	icon  *pointerButton
+	icon  fyne.CanvasObject
 	label *widget.Label
 }
 
@@ -327,7 +391,7 @@ func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete 
 	name := widget.NewLabelWithStyle(group.Name, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	deleteButton := newPointerButton("", theme.DeleteIcon(), onDelete)
 	deleteButton.Importance = widget.LowImportance
-	iconButton := newPointerButton("", theme.ContentAddIcon(), func() {
+	iconButton := newCategoryEmojiButton(group.Icon, false, fyne.NewSize(40, 40), func() {
 		showCategoryEmojiPicker(w, db.categories[group.ID].Icon, func(icon string) {
 			if err := db.setCategoryIcon(group.ID, icon); err != nil {
 				showError(err, w)
@@ -336,7 +400,6 @@ func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete 
 			refresh()
 		})
 	})
-	iconButton.Importance = widget.LowImportance
 	colorButton := newPointerButton("", theme.ColorPaletteIcon(), func() {
 		showCategoryColorPicker(w, db.categories[group.ID].Color, func(value string) {
 			if err := db.setCategoryColor(group.ID, value); err != nil {
@@ -353,13 +416,7 @@ func newTodoCategoryPanel(w fyne.Window, db *memoryDB, group category, onDelete 
 	refresh = func() {
 		group = db.categories[group.ID]
 		name.SetText(group.Name)
-		if group.Icon == "" {
-			iconButton.SetText("")
-			iconButton.SetIcon(theme.ContentAddIcon())
-		} else {
-			iconButton.SetIcon(nil)
-			iconButton.SetText(group.Icon)
-		}
+		iconButton.SetEmoji(group.Icon)
 		panel.surface.color = group.Color
 		panel.surface.Refresh()
 		refreshRows()
@@ -424,7 +481,7 @@ func todoUI(w fyne.Window, db *memoryDB) fyne.CanvasObject {
 	}
 	drag.refresh = refresh
 	var selectedIcon string
-	var iconButton *pointerButton
+	var iconButton *categoryEmojiButton
 	add := func() {
 		if err := db.addCategoryWithIcon(entry.Text, selectedIcon); err != nil {
 			showError(err, w)
@@ -432,19 +489,15 @@ func todoUI(w fyne.Window, db *memoryDB) fyne.CanvasObject {
 		}
 		entry.SetText("")
 		selectedIcon = ""
-		iconButton.SetText("Emoji")
+		iconButton.SetEmoji("")
 		refresh()
 		w.Canvas().Focus(entry)
 	}
 	entry.OnSubmitted = func(string) { add() }
-	iconButton = newPointerButton("Emoji", nil, func() {
+	iconButton = newCategoryEmojiButton("", false, fyne.NewSize(40, 40), func() {
 		showCategoryEmojiPicker(w, selectedIcon, func(icon string) {
 			selectedIcon = icon
-			if icon == "" {
-				iconButton.SetText("Emoji")
-			} else {
-				iconButton.SetText(icon)
-			}
+			iconButton.SetEmoji(icon)
 		})
 	})
 	addButton := newPointerButton("Add category", theme.ContentAddIcon(), add)

@@ -65,6 +65,10 @@ func TestCategoryUI(t *testing.T) {
 		t.Helper()
 		return findUIObject(t, root, func(button *pointerButton) bool { return button.Text == text })
 	}
+	findEmojiButton := func(root fyne.CanvasObject, emoji string) *categoryEmojiButton {
+		t.Helper()
+		return findUIObject(t, root, func(button *categoryEmojiButton) bool { return button.emoji == emoji })
+	}
 	findPanel := func(name string) *widget.Card {
 		t.Helper()
 		return findUIObject(t, content, func(card *widget.Card) bool {
@@ -98,10 +102,14 @@ func TestCategoryUI(t *testing.T) {
 		return entry.PlaceHolder == "Category name (Life, Money, Work...)"
 	})
 	categoryEntry.SetText("Life")
-	test.Tap(findButton(content, "Emoji"))
-	test.Tap(findButton(w.Canvas().Overlays().Top(), "🏠"))
+	test.Tap(findEmojiButton(content, ""))
+	emojiTile := findEmojiButton(w.Canvas().Overlays().Top(), "🏠")
+	if emojiTile.MinSize() != fyne.NewSize(48, 48) || len(categoryEmojis) <= 24 {
+		t.Fatal("emoji picker choices are not a larger, expanded set")
+	}
+	test.Tap(emojiTile)
 	test.Tap(findButton(content, "Add category"))
-	if db.listCategories()[0].Icon != "🏠" || findButton(content, "Emoji") == nil {
+	if db.listCategories()[0].Icon != "🏠" || findEmojiButton(content, "") == nil {
 		t.Fatal("category emoji was not saved and reset")
 	}
 	life := findPanel("Life")
@@ -121,30 +129,28 @@ func TestCategoryUI(t *testing.T) {
 		t.Fatal("category panel does not stretch to fill the available window height")
 	}
 	findTodoEntry(life).SetText("Another draft")
-	test.Tap(findButton(life, "🏠"))
-	test.Tap(findButton(w.Canvas().Overlays().Top(), "⭐"))
+	test.Tap(findEmojiButton(life, "🏠"))
+	test.Tap(findEmojiButton(w.Canvas().Overlays().Top(), "⭐"))
 	if db.listCategories()[0].Icon != "⭐" || findTodoEntry(life).Text != "Another draft" {
 		t.Fatal("changing the category emoji lost its draft or did not save")
 	}
 	findUIObject(t, life, func(label *widget.Label) bool {
 		return label.Text == "Life" && label.Alignment == fyne.TextAlignCenter
 	})
-	test.Tap(findButton(life, "⭐"))
+	test.Tap(findEmojiButton(life, "⭐"))
 	test.Tap(findButton(w.Canvas().Overlays().Top(), "Cancel"))
 	if db.listCategories()[0].Icon != "⭐" {
 		t.Fatal("canceling the emoji picker changed the category")
 	}
-	test.Tap(findButton(life, "⭐"))
+	test.Tap(findEmojiButton(life, "⭐"))
 	test.Tap(findButton(w.Canvas().Overlays().Top(), "No icon"))
 	if db.listCategories()[0].Icon != "" {
 		t.Fatal("category emoji could not be removed")
 	}
 	lifeHeader := life.Content.(*fyne.Container).Objects[1]
-	addIcon := findUIObject(t, lifeHeader, func(button *pointerButton) bool {
-		return button.Text == "" && button.Icon != nil && button.Icon.Name() == theme.ContentAddIcon().Name()
-	})
+	addIcon := findEmojiButton(lifeHeader, "")
 	test.Tap(addIcon)
-	test.Tap(findButton(w.Canvas().Overlays().Top(), "🌱"))
+	test.Tap(findEmojiButton(w.Canvas().Overlays().Top(), "🌱"))
 	if db.listCategories()[0].Icon != "🌱" {
 		t.Fatal("category plus did not add an icon")
 	}
