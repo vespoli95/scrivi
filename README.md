@@ -1,7 +1,7 @@
 # Scrivi app
 
-A tiny Go desktop todo list built with Fyne. Add todos with the Add button or
-Enter, check them off, and delete them with the trash button.
+A tiny Rust desktop todo list built with `eframe` / `egui`. Add todos with the Add button or
+Enter (and use Shift+Enter for line breaks), check them off, and delete them with the trash button.
 
 Create categories, such as Life, Money, or Work, using **Add category** or Enter.
 Each category has its own todo entry and scrollable list. Use a todo's edit
@@ -32,8 +32,8 @@ automatically refresh changes from other processes.
 
 ## Run
 
-Install Go 1.24 or newer and a C compiler. On Debian/Ubuntu, install the desktop
-build dependencies:
+Install a stable Rust toolchain via [rustup](https://rustup.rs/). On Debian/Ubuntu, install the
+desktop build dependencies:
 
 ```sh
 sudo apt-get install build-essential pkg-config libgl1-mesa-dev xorg-dev
@@ -42,27 +42,24 @@ sudo apt-get install build-essential pkg-config libgl1-mesa-dev xorg-dev
 Then, from this directory:
 
 ```sh
-go run .
+cargo run
 ```
 
 A graphical desktop session is required. On macOS, install the Xcode command-line
-tools; on Windows, use a GCC toolchain such as MinGW-w64. To embed the Windows
-executable icon when building locally, first run from the project root:
-
-```sh
-windres -i packaging/windows/icon.rc -o resource_windows_amd64.syso -O coff
-```
+tools; on Windows, use the MSVC toolchain (the build script embeds `assets/icon.ico`
+automatically when targeting Windows).
 
 ## Build
 
 ```sh
-go build -o scrivi .
+cargo build --release
 ```
 
-## Test without a display
+## Test and lint without a display
 
 ```sh
-go test -tags ci ./...
+cargo test --locked
+cargo clippy --all-targets --locked -- -D warnings
 ```
 
 ## Windows installation and automatic updates
@@ -162,4 +159,4 @@ scrivi. Push a change to `main`, keep the app open, and accept its update
 notification after the new release is published. Confirm the installer runs,
 scrivi restarts, your todos survive, and the notification does not reappear on
 the latest version. Check offline launch and uninstall too.
-This Windows installation/update check cannot be replaced by headless Go tests.
+This Windows installation/update check cannot be replaced by headless tests.

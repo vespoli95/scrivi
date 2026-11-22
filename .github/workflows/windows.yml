@@ -68,37 +68,26 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          go-version-file: go.mod
-          cache: true
-      - name: Install MinGW compiler
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          install: mingw-w64-x86_64-gcc
-      - name: Enable MinGW compiler
-        shell: msys2 {0}
-        run: |
-          set -euo pipefail
-          gcc --version
-          cygpath -w /mingw64/bin >> "$GITHUB_PATH"
-          echo 'CGO_ENABLED=1' >> "$GITHUB_ENV"
-          echo 'CC=gcc' >> "$GITHUB_ENV"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
       - name: Check and build Windows executable
         shell: pwsh
         env:
           BUILD_VERSION: ${{ needs.version.outputs.version }}
           BUILD_REPOSITORY: ${{ github.repository }}
         run: |
-          windres -i packaging/windows/icon.rc -o resource_windows_amd64.syso -O coff
-          if ($LASTEXITCODE -ne 0) { throw 'Icon resource compilation failed.' }
-          go test -tags ci ./...
+          $env:SCRIVI_VERSION = $env:BUILD_VERSION
+          $env:SCRIVI_REPOSITORY = $env:BUILD_REPOSITORY
+          cargo test --locked
           if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
-          go vet ./...
-          if ($LASTEXITCODE -ne 0) { throw 'Vet failed.' }
-          go build -trimpath -ldflags "-s -w -H=windowsgui -extldflags=-static -X main.appVersion=$env:BUILD_VERSION -X main.releaseRepository=$env:BUILD_REPOSITORY" -o build/scrivi.exe .
+          cargo clippy --all-targets --locked -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'Clippy failed.' }
+          cargo build --release --locked
           if ($LASTEXITCODE -ne 0) { throw 'Windows build failed.' }
+          New-Item -ItemType Directory -Path build -Force | Out-Null
+          Copy-Item -LiteralPath target/release/scrivi.exe -Destination build/scrivi.exe -Force
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64

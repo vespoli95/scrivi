@@ -1,8 +1,6 @@
-/scrivi
-/scrivi.exe
+/target/
 /build/
 /dist/
-/resource_windows_amd64.syso
 *.pfx
 *.p12
 *.key
