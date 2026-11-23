@@ -1092,3 +1092,167 @@ fn test_button_and_title_cursors() {
     h.hover(&mut app, title_rect.center());
     assert_eq!(app.last_cursor_icon(), CursorIcon::PointingHand);
 }
+
+#[test]
+fn test_layout_stays_within_window_right_edge() {
+    let widths = [300.0_f32, 400.0, 760.0, 1200.0];
+    let assert_within_window = |app: &ScriviApp, width: f32, label: &str| {
+        let max_right = width - 12.0;
+        let snap = app.snapshot();
+        let settings_rect = snap.settings_rect.expect("settings button missing");
+        let add_cat_rect = snap.new_cat_add_rect.expect("add category button missing");
+
+        assert!(
+            settings_rect.right() <= max_right + 0.01,
+            "{label} @ {width}: settings_rect {} exceeds {max_right}",
+            settings_rect.right()
+        );
+        assert!(
+            add_cat_rect.right() <= max_right + 0.01,
+            "{label} @ {width}: new_cat_add_rect {} exceeds {max_right}",
+            add_cat_rect.right()
+        );
+        assert!(
+            (add_cat_rect.right() - settings_rect.right()).abs() < 0.01,
+            "{label} @ {width}: new_cat_add_rect {} != settings_rect {}",
+            add_cat_rect.right(),
+            settings_rect.right()
+        );
+        assert!(
+            snap.outer_scroll_rect.right() <= max_right + 0.01,
+            "{label} @ {width}: outer_scroll_rect {} exceeds {max_right}",
+            snap.outer_scroll_rect.right()
+        );
+
+        for (&cat_id, panel) in &snap.category_panels {
+            assert!(
+                panel.card_rect.right() <= max_right + 0.01,
+                "{label} @ {width} cat {cat_id}: card_rect {} exceeds {max_right}",
+                panel.card_rect.right()
+            );
+            let inner_right = panel.card_rect.right() - 12.0;
+            assert!(
+                panel.delete_rect.right() <= inner_right + 0.01,
+                "{label} @ {width} cat {cat_id}: delete_rect {} exceeds {inner_right}",
+                panel.delete_rect.right()
+            );
+            assert!(
+                panel.color_rect.right() < panel.delete_rect.left(),
+                "{label} @ {width} cat {cat_id}: color_rect {} overlaps delete_rect {}",
+                panel.color_rect.right(),
+                panel.delete_rect.left()
+            );
+            assert!(
+                panel.todo_input_rect.right() < panel.todo_add_rect.left(),
+                "{label} @ {width} cat {cat_id}: todo_input_rect {} overlaps todo_add_rect {}",
+                panel.todo_input_rect.right(),
+                panel.todo_add_rect.left()
+            );
+            assert!(
+                panel.todo_add_rect.right() <= inner_right + 0.01,
+                "{label} @ {width} cat {cat_id}: todo_add_rect {} exceeds {inner_right}",
+                panel.todo_add_rect.right()
+            );
+            assert!(
+                panel.scroll_rect.right() <= inner_right + 0.01,
+                "{label} @ {width} cat {cat_id}: scroll_rect {} exceeds {inner_right}",
+                panel.scroll_rect.right()
+            );
+
+            for &(todo_id, ref row) in &panel.todo_rows {
+                assert!(
+                    row.row_rect.right() <= inner_right + 0.01,
+                    "{label} @ {width} cat {cat_id} todo {todo_id}: row_rect {} exceeds {inner_right}",
+                    row.row_rect.right()
+                );
+                assert!(
+                    row.delete_rect.right() <= inner_right + 0.01,
+                    "{label} @ {width} cat {cat_id} todo {todo_id}: delete_rect {} exceeds {inner_right}",
+                    row.delete_rect.right()
+                );
+                assert!(
+                    row.edit_rect.right() < row.delete_rect.left(),
+                    "{label} @ {width} cat {cat_id} todo {todo_id}: edit_rect {} overlaps delete_rect {}",
+                    row.edit_rect.right(),
+                    row.delete_rect.left()
+                );
+                assert!(
+                    row.title_rect.right() < row.edit_rect.left(),
+                    "{label} @ {width} cat {cat_id} todo {todo_id}: title_rect {} overlaps edit_rect {}",
+                    row.title_rect.right(),
+                    row.edit_rect.left()
+                );
+            }
+        }
+    };
+
+    for count in [1usize, 2, 5] {
+        let mut db = MemoryDb::open_in_memory().unwrap();
+        let mut first_id = 0;
+        for i in 0..count {
+            let id = db.add_category(&format!("Category {}", i + 1)).unwrap();
+            if i == 0 {
+                first_id = id;
+            }
+            db.add_in_category(
+                "A long task description with many words that wraps across multiple lines inside the card",
+                id,
+            )
+            .unwrap();
+            db.add_in_category(
+                "SupercalifragilisticexpialidociousLongUnbrokenWordThatShouldStayClippedInsideTitleRect",
+                id,
+            )
+            .unwrap();
+        }
+
+        let mut app = ScriviApp::new(
+            db,
+            Box::new(MockPlatform {
+                state: Rc::new(RefCell::new(MockPlatformState::default())),
+            }),
+            None,
+        );
+        let mut h = TestHarness::new(760.0, 600.0);
+        h.pump(&mut app);
+
+        let draft_input = app.snapshot().category_panels[&first_id].todo_input_rect;
+        h.replace_text(
+            &mut app,
+            draft_input,
+            "Line one\nLine two with trailing spaces     ",
+        );
+
+        for width in widths {
+            h.resize(&mut app, width, 600.0);
+            assert_within_window(&app, width, &format!("{count} categories"));
+        }
+    }
+
+    // EditTodo modal fits inside both 760x600 and narrow 400x600 viewports
+    let mut db = MemoryDb::open_in_memory().unwrap();
+    let cat_id = db.add_category("Life").unwrap();
+    db.add_in_category("Task to edit", cat_id).unwrap();
+    let mut app = ScriviApp::new(
+        db,
+        Box::new(MockPlatform {
+            state: Rc::new(RefCell::new(MockPlatformState::default())),
+        }),
+        None,
+    );
+    let mut h = TestHarness::new(760.0, 600.0);
+    h.pump(&mut app);
+
+    let edit_rect = app.snapshot().category_panels[&cat_id].todo_rows[0]
+        .1
+        .edit_rect;
+    h.click(&mut app, edit_rect.center());
+    for width in [760.0_f32, 400.0] {
+        h.resize(&mut app, width, 600.0);
+        let modal_rect = app.snapshot().modal_rect.expect("EditTodo modal missing");
+        assert!(
+            modal_rect.left() >= -0.01 && modal_rect.right() <= width + 0.01,
+            "EditTodo modal @ {width} overflows viewport: {modal_rect:?}"
+        );
+    }
+}

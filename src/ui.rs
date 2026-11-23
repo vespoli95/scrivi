@@ -630,10 +630,11 @@ impl ScriviApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(p.background).inner_margin(12))
             .show(ctx, |ui| {
+                let panel_inner_rect = ui.max_rect();
                 ui.add_enabled_ui(!has_modal, |ui| {
                     self.render_header(ui, &theme_name);
                     ui.add_space(10.0);
-                    self.render_category_grid(ui, &theme_name);
+                    self.render_category_grid(ui, panel_inner_rect, &theme_name);
                 });
             });
 
@@ -712,16 +713,19 @@ impl ScriviApp {
                     });
                 }
 
-                let add_width = 128.0;
+                let add_width = icon_text_button_width(ui, "Add category").max(128.0);
                 let spacing = ui.spacing().item_spacing.x;
-                let entry_width = (ui.available_width() - add_width - spacing).max(60.0);
+                let entry_margin = egui::Margin::symmetric(10, 10);
+                let entry_outer_width = (ui.available_width() - add_width - spacing)
+                    .max(entry_margin.sum().x + 24.0);
+                let entry_inner_width = (entry_outer_width - entry_margin.sum().x).max(0.0);
 
                 let input_id = Id::new("new_category_name_input");
                 let output = TextEdit::singleline(&mut self.new_category_name)
                     .id(input_id)
                     .hint_text("Category name (Life, Money, Work...)")
-                    .desired_width(entry_width)
-                    .margin(egui::Margin::symmetric(10, 10))
+                    .desired_width(entry_inner_width)
+                    .margin(entry_margin)
                     .show(ui);
                 self.snapshot.new_cat_input_rect = Some(output.response.rect);
 
@@ -750,13 +754,20 @@ impl ScriviApp {
         });
     }
 
-    fn render_category_grid(&mut self, ui: &mut Ui, theme_name: &str) {
+    fn render_category_grid(&mut self, ui: &mut Ui, panel_inner_rect: Rect, theme_name: &str) {
         let p = palette(theme_name);
         let Some(db) = self.db.as_ref() else {
             return;
         };
         let groups = db.list_categories();
-        let avail_rect = ui.available_rect_before_wrap();
+        let raw_avail = ui.available_rect_before_wrap();
+        let avail_rect = Rect::from_min_max(
+            pos2(panel_inner_rect.left(), raw_avail.top()),
+            pos2(
+                panel_inner_rect.right(),
+                panel_inner_rect.bottom().max(raw_avail.top()),
+            ),
+        );
         self.outer_scroll_rect = avail_rect;
         self.snapshot.outer_scroll_rect = avail_rect;
 
@@ -779,25 +790,28 @@ impl ScriviApp {
             return;
         }
 
-        let grid = compute_category_grid(
-            groups.len(),
-            avail_rect.size(),
-            vec2(CELL_MIN_WIDTH, CELL_MIN_HEIGHT),
-            GRID_GAP,
-        );
-        self.grid_columns = grid.columns;
-        self.outer_content_height = grid.content_height;
-        self.snapshot.outer_content_height = grid.content_height;
-
         let mut pending_actions: Vec<UiAction> = Vec::new();
+        let mut grid_columns = self.grid_columns;
+        let mut grid_content_height = 0.0_f32;
 
         let scroll_out = ScrollArea::vertical()
             .id_salt("category_grid_scroll")
+            .max_width(avail_rect.width())
             .auto_shrink([false, false])
             .vertical_scroll_offset(self.outer_scroll_offset)
             .show(ui, |ui| {
+                let grid_width = ui.available_width().min(avail_rect.width()).max(0.0);
+                let grid = compute_category_grid(
+                    groups.len(),
+                    vec2(grid_width, avail_rect.height()),
+                    vec2(CELL_MIN_WIDTH, CELL_MIN_HEIGHT),
+                    GRID_GAP,
+                );
+                grid_columns = grid.columns;
+                grid_content_height = grid.content_height;
+
                 let (canvas_rect, _) = ui.allocate_exact_size(
-                    vec2(avail_rect.width(), grid.content_height),
+                    vec2(grid_width, grid.content_height),
                     Sense::hover(),
                 );
                 for (idx, group) in groups.iter().enumerate() {
@@ -820,6 +834,12 @@ impl ScriviApp {
                         .insert(group.id, panel_rects.inner);
                 }
             });
+
+        self.grid_columns = grid_columns;
+        self.outer_content_height = grid_content_height;
+        self.snapshot.outer_content_height = grid_content_height;
+        self.outer_scroll_rect = scroll_out.inner_rect;
+        self.snapshot.outer_scroll_rect = scroll_out.inner_rect;
 
         let max_outer =
             (scroll_out.content_size.y - scroll_out.inner_rect.height()).max(0.0);
@@ -846,10 +866,11 @@ impl ScriviApp {
             Stroke::new(1.0_f32, p.border)
         };
         ui.painter()
-            .rect(card_rect, CornerRadius::same(10), fill, border_stroke, egui::StrokeKind::Middle);
+            .rect(card_rect, CornerRadius::same(10), fill, border_stroke, egui::StrokeKind::Inside);
 
         let inner_rect = card_rect.shrink(12.0);
         let mut card_ui = ui.new_child(egui::UiBuilder::new().max_rect(inner_rect));
+        card_ui.set_clip_rect(ui.clip_rect().intersect(card_rect));
 
         // Title bar
         let header_height = 40.0;
@@ -921,9 +942,11 @@ impl ScriviApp {
         }
 
         // Centered heading between balanced left/right controls
+        let heading_left = header_rect.left() + controls_w + 6.0;
+        let heading_right = (header_rect.right() - controls_w - 6.0).max(heading_left);
         let heading_avail = Rect::from_min_max(
-            pos2(header_rect.left() + controls_w + 6.0, header_rect.top()),
-            pos2(header_rect.right() - controls_w - 6.0, header_rect.bottom()),
+            pos2(heading_left, header_rect.top()),
+            pos2(heading_right, header_rect.bottom()),
         );
         let heading_font = FontId::proportional(16.0);
         let name_galley = card_ui.fonts(|f| {
@@ -990,51 +1013,78 @@ impl ScriviApp {
         card_ui.add_space(8.0);
 
         // Multiline todo input row
-        let mut todo_input_rect = Rect::NOTHING;
-        let mut todo_add_rect = Rect::NOTHING;
         let draft = self.todo_drafts.entry(group.id).or_default();
         let focus_this = self.focus_todo_entry == Some(group.id);
         if focus_this {
             self.focus_todo_entry = None;
         }
 
-        card_ui.horizontal(|ui| {
-            let add_side = 36.0;
-            let spacing = ui.spacing().item_spacing.x;
-            let entry_width = (ui.available_width() - add_side - spacing).max(40.0);
-            let entry_id = Id::new(("todo_entry", group.id));
-            let (entry_resp, enter_submit) = render_multiline_submit_entry(
-                ui,
-                entry_id,
-                draft,
-                "What needs doing?",
-                entry_width,
-                2,
-                focus_this,
-            );
-            todo_input_rect = entry_resp.rect;
+        let add_side = 36.0;
+        let spacing = card_ui.spacing().item_spacing.x;
+        let entry_outer_width = (inner_rect.width() - add_side - spacing).max(24.0);
+        let row_top = card_ui.cursor().top();
+        let entry_max_rect = Rect::from_min_max(
+            pos2(inner_rect.left(), row_top),
+            pos2(
+                inner_rect.left() + entry_outer_width,
+                inner_rect.bottom().max(row_top),
+            ),
+        );
+        let mut entry_ui = card_ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(entry_max_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        entry_ui.set_clip_rect(card_ui.clip_rect().intersect(Rect::from_min_max(
+            pos2(inner_rect.left() - 1.0, row_top - 1.0),
+            pos2(entry_max_rect.right() + 1.0, inner_rect.bottom().max(row_top)),
+        )));
+        let entry_id = Id::new(("todo_entry", group.id));
+        let (entry_resp, enter_submit) = render_multiline_submit_entry(
+            &mut entry_ui,
+            entry_id,
+            draft,
+            "What needs doing?",
+            entry_outer_width,
+            2,
+            focus_this,
+        );
+        let todo_input_rect = entry_resp.rect;
 
-            let add_resp = icon_button_sized(
-                ui,
-                Id::new(("todo_add_btn", group.id)),
-                vec2(add_side, entry_resp.rect.height().max(add_side)),
-                ButtonImportance::High,
-                theme_name,
-                icons::paint_plus,
-            );
-            todo_add_rect = add_resp.rect;
+        let row_height = entry_ui.min_rect().height().max(add_side);
+        let add_rect = Rect::from_min_size(
+            pos2(inner_rect.right() - add_side, row_top),
+            vec2(add_side, row_height),
+        );
+        let add_resp = icon_button_in_rect(
+            &mut card_ui,
+            add_rect,
+            Id::new(("todo_add_btn", group.id)),
+            ButtonImportance::High,
+            theme_name,
+            icons::paint_plus,
+        );
+        let todo_add_rect = add_resp.rect;
 
-            if enter_submit || add_resp.clicked() {
-                actions.push(UiAction::AddTodo {
-                    category_id: group.id,
-                });
-            }
-        });
+        if enter_submit || add_resp.clicked() {
+            actions.push(UiAction::AddTodo {
+                category_id: group.id,
+            });
+        }
+
+        card_ui.advance_cursor_after_rect(Rect::from_min_size(
+            pos2(inner_rect.left(), row_top),
+            vec2(inner_rect.width(), row_height),
+        ));
 
         card_ui.add_space(8.0);
 
         // Scrollable todo list
-        let scroll_avail = card_ui.available_rect_before_wrap();
+        let raw_scroll = card_ui.available_rect_before_wrap();
+        let scroll_avail = Rect::from_min_max(
+            pos2(inner_rect.left(), raw_scroll.top()),
+            pos2(inner_rect.right(), inner_rect.bottom().max(raw_scroll.top())),
+        );
         self.inner_scroll_rects.insert(group.id, scroll_avail);
 
         let items = self
@@ -1054,10 +1104,11 @@ impl ScriviApp {
 
         let inner_scroll_out = ScrollArea::vertical()
             .id_salt(("cat_todos_scroll", group.id))
+            .max_width(scroll_avail.width())
             .auto_shrink([false, false])
             .vertical_scroll_offset(prev_inner_offset)
             .show(&mut card_ui, |ui| {
-                let list_width = ui.available_width().max(1.0);
+                let list_width = ui.available_width().min(scroll_avail.width()).max(1.0);
                 if items.is_empty() {
                     ui.label(
                         RichText::new("No todos yet. Add one above.").color(p.muted),
@@ -1344,10 +1395,13 @@ impl ScriviApp {
                             });
 
                         let frame_out = frame.show(ui, |ui| {
+                            let max_modal_width = (ctx.screen_rect().width() - 56.0).max(200.0);
+                            ui.set_max_width(max_modal_width);
                             self.render_single_modal(
                                 ui,
                                 &mut modal,
                                 is_top,
+                                max_modal_width,
                                 theme_name,
                                 &mut next_action,
                             )
@@ -1370,6 +1424,7 @@ impl ScriviApp {
         ui: &mut Ui,
         modal: &mut Modal,
         is_top: bool,
+        max_modal_width: f32,
         theme_name: &str,
         out: &mut Option<ModalResult>,
     ) {
@@ -1379,8 +1434,8 @@ impl ScriviApp {
                 message,
                 close_app_on_ok,
             } => {
-                ui.set_min_width(340.0);
-                ui.set_max_width(440.0);
+                ui.set_min_width(340.0_f32.min(max_modal_width));
+                ui.set_max_width(440.0_f32.min(max_modal_width));
                 if is_top {
                     self.snapshot.modal_title = Some("Error".into());
                     self.snapshot.modal_message = Some(message.clone());
@@ -1412,8 +1467,8 @@ impl ScriviApp {
                 message,
                 kind,
             } => {
-                ui.set_min_width(340.0);
-                ui.set_max_width(440.0);
+                ui.set_min_width(340.0_f32.min(max_modal_width));
+                ui.set_max_width(440.0_f32.min(max_modal_width));
                 if is_top {
                     self.snapshot.modal_title = Some(title.clone());
                     self.snapshot.modal_message = Some(message.clone());
@@ -1505,7 +1560,7 @@ impl ScriviApp {
                 category_id,
                 selected,
             } => {
-                ui.set_min_width(260.0);
+                ui.set_min_width(260.0_f32.min(max_modal_width));
                 if is_top {
                     self.snapshot.modal_title = Some("Category color".into());
                 }
@@ -1562,7 +1617,9 @@ impl ScriviApp {
                 draft,
                 request_focus,
             } => {
-                ui.set_min_size(vec2(568.0, 288.0));
+                let modal_width = max_modal_width.clamp(240.0, 568.0);
+                ui.set_max_width(modal_width);
+                ui.set_min_size(vec2(modal_width, 288.0));
                 if is_top {
                     self.snapshot.modal_title = Some("Edit todo".into());
                 }
@@ -1581,7 +1638,7 @@ impl ScriviApp {
                     Id::new(("edit_todo_input", *todo_id)),
                     draft,
                     "What needs doing?",
-                    568.0,
+                    modal_width,
                     6,
                     focus_now,
                 );
@@ -1615,7 +1672,7 @@ impl ScriviApp {
                 startup_disabled,
                 theme_popup_open,
             } => {
-                ui.set_min_width(320.0);
+                ui.set_min_width(320.0_f32.min(max_modal_width));
                 if is_top {
                     self.snapshot.modal_title = Some("Settings".into());
                 }
@@ -1737,7 +1794,7 @@ impl ScriviApp {
                 });
             }
             Modal::DownloadingUpdate => {
-                ui.set_min_width(300.0);
+                ui.set_min_width(300.0_f32.min(max_modal_width));
                 if is_top {
                     self.snapshot.modal_title = Some("Downloading update".into());
                 }
@@ -1907,10 +1964,12 @@ pub fn render_multiline_submit_entry(
     focus_now: bool,
 ) -> (Response, bool) {
     let shift_enter = KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter);
+    let margin = egui::Margin::symmetric(4, 2);
     let output = TextEdit::multiline(text)
         .id(id)
         .hint_text(hint)
-        .desired_width(width)
+        .margin(margin)
+        .desired_width((width - margin.sum().x).max(0.0))
         .desired_rows(desired_rows)
         .return_key(shift_enter)
         .show(ui);
@@ -2010,12 +2069,13 @@ pub fn paint_todo_title(
         });
     }
 
-    ui.painter().galley(text_pos, galley, ink);
+    let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(title_rect));
+    painter.galley(text_pos, galley, ink);
 
     if done {
         for line in &lines {
             if let Some((a, b)) = line.strike_segment {
-                ui.painter().line_segment([a, b], Stroke::new(1.2_f32, ink));
+                painter.line_segment([a, b], Stroke::new(1.2_f32, ink));
             }
         }
     }
@@ -2154,6 +2214,18 @@ fn icon_text_button_sized(
     icon_text_button_impl(ui, text, Some(size), importance, theme_name, paint_icon)
 }
 
+fn icon_text_button_width(ui: &Ui, text: &str) -> f32 {
+    let font_id = FontId::proportional(14.0);
+    let galley = ui.fonts(|f| f.layout_no_wrap(text.to_string(), font_id, Color32::WHITE));
+    icon_text_button_width_for_galley(&galley)
+}
+
+fn icon_text_button_width_for_galley(galley: &egui::Galley) -> f32 {
+    let icon_side = 16.0;
+    let gap = 6.0;
+    (icon_side + gap + galley.size().x + 22.0).max(74.0)
+}
+
 fn icon_text_button_impl(
     ui: &mut Ui,
     text: &str,
@@ -2168,7 +2240,7 @@ fn icon_text_button_impl(
     let gap = 6.0;
     let desired = explicit_size.unwrap_or_else(|| {
         vec2(
-            (icon_side + gap + galley.size().x + 22.0).max(74.0),
+            icon_text_button_width_for_galley(&galley),
             (galley.size().y + 14.0).max(32.0),
         )
     });
@@ -2195,18 +2267,6 @@ fn icon_text_button_impl(
     );
     ui.painter().galley(text_pos, colored_galley, fg);
     resp
-}
-
-fn icon_button_sized(
-    ui: &mut Ui,
-    id: Id,
-    size: Vec2,
-    importance: ButtonImportance,
-    theme_name: &str,
-    paint_icon: impl FnOnce(&Ui, Rect, Color32),
-) -> Response {
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    icon_button_in_rect(ui, rect, id, importance, theme_name, paint_icon)
 }
 
 fn icon_button_in_rect(
