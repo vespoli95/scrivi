@@ -12,10 +12,13 @@ theme. These choices and ordering are saved across restarts. Deleting a category
 also deletes its todos after confirmation. Older unassigned todos, if any, are
 preserved in a regular **Recovered todos** category.
 
-On Windows, use the **Pin** button to keep Scrivi above other windows.
-**Settings** lets you choose whether Scrivi starts when you sign in. The startup
-choice persists; pinning lasts until you unpin the window or close Scrivi.
-Windows may also allow startup apps to be disabled in its own settings.
+On Windows, Scrivi starts pinned above other windows in the top-left corner of
+the screen as a collapsed view showing the first category (scrollable to other
+categories). Use the **Unpin** / **Pin** button to toggle between that docked
+view and the full window. **Settings** lets you choose whether Scrivi starts
+when you sign in. The startup choice persists; pinning resets on restart or
+when you unpin the window. Windows may also allow startup apps to be disabled
+in its own settings.
 
 Todos are kept in memory while the app runs. Each change is saved immediately
 to a local SQLite database and loaded back into memory on startup. No server

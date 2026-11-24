@@ -3,6 +3,10 @@ use egui::{pos2, vec2, Pos2, Rect, Vec2};
 pub const CELL_MIN_WIDTH: f32 = 340.0;
 pub const CELL_MIN_HEIGHT: f32 = 240.0;
 pub const GRID_GAP: f32 = 12.0;
+pub const DEFAULT_WINDOW_WIDTH: f32 = 760.0;
+pub const DEFAULT_WINDOW_HEIGHT: f32 = 600.0;
+pub const PINNED_WINDOW_WIDTH: f32 = 380.0;
+pub const PINNED_WINDOW_HEIGHT: f32 = 360.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CategoryGridLayout {
@@ -56,6 +60,38 @@ pub fn compute_category_grid(
         rows,
         cell_height,
         content_height: min_height.max(max_bottom),
+        rects,
+    }
+}
+
+/// Stacks categories in a single vertical column where each card fills the visible viewport
+/// height so pinned mode shows the first category while remaining scrollable to others.
+pub fn compute_pinned_category_stack(
+    count: usize,
+    avail_size: Vec2,
+    cell_min_height: f32,
+    gap: f32,
+) -> CategoryGridLayout {
+    let columns = 1;
+    let rows = count.max(1);
+    let cell_height = avail_size.y.max(cell_min_height);
+    let width = avail_size.x.max(0.0);
+    let mut rects = Vec::with_capacity(count);
+    for idx in 0..count {
+        let y = (idx as f32) * (cell_height + gap);
+        rects.push(Rect::from_min_size(pos2(0.0, y), vec2(width, cell_height)));
+    }
+    let content_height = if count == 0 {
+        cell_height
+    } else {
+        (count as f32) * cell_height + (count as f32 - 1.0) * gap
+    };
+
+    CategoryGridLayout {
+        columns,
+        rows,
+        cell_height,
+        content_height,
         rects,
     }
 }

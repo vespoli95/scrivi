@@ -2,7 +2,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use egui::{pos2, vec2, CursorIcon, Event, FontId, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, RawInput, Rect, Vec2};
-use scrivi::layout::{compute_category_grid, compute_heading_layout, GRID_GAP};
+use scrivi::layout::{
+    compute_category_grid, compute_heading_layout, compute_pinned_category_stack, GRID_GAP,
+    PINNED_WINDOW_HEIGHT, PINNED_WINDOW_WIDTH,
+};
 use scrivi::options::WindowPlatform;
 use scrivi::store::{MemoryDb, CATEGORY_EMOJIS};
 use scrivi::theme::{palette, DEFAULT_THEME};
@@ -256,6 +259,14 @@ fn new_app(platform: Box<dyn WindowPlatform>) -> ScriviApp {
     ScriviApp::new(db, platform, None)
 }
 
+fn pump_unpinned(h: &mut TestHarness, app: &mut ScriviApp) {
+    h.pump(app);
+    if app.is_pinned() {
+        let pin_rect = app.snapshot().pin_rect.unwrap();
+        h.click(app, pin_rect.center());
+    }
+}
+
 fn find_modal_button(app: &ScriviApp, label: &str) -> Rect {
     app.snapshot()
         .modal_buttons
@@ -355,7 +366,7 @@ fn test_category_ui() {
         state: Rc::new(RefCell::new(MockPlatformState::default())),
     }));
     let mut h = TestHarness::new(760.0, 600.0);
-    h.pump(&mut app);
+    pump_unpinned(&mut h, &mut app);
 
     assert!(app.db().unwrap().list_categories().is_empty());
     assert!(app.snapshot().empty_categories_rect.is_some());
@@ -554,9 +565,29 @@ fn test_window_options() {
     let mut h = TestHarness::new(760.0, 600.0);
     h.pump(&mut app);
 
-    // Pin -> Unpin + error handling
+    // Starts pinned on platforms that support pinning
+    assert!(app.is_pinned());
+    assert!(state.borrow().pinned);
+
+    // Failed unpin keeps it pinned and surfaces an error
+    state.borrow_mut().fail_pin = true;
     let pin_rect = app.snapshot().pin_rect.unwrap();
+    h.click(&mut app, pin_rect.center());
+    assert!(app.is_pinned());
+    assert!(state.borrow().pinned);
+    assert_eq!(app.active_modal_title(), Some("Error"));
+    let ok_rect = find_modal_button(&app, "OK");
+    h.click(&mut app, ok_rect.center());
+
+    // Unpin succeeds
+    state.borrow_mut().fail_pin = false;
+    let pin_rect = app.snapshot().pin_rect.unwrap();
+    h.click(&mut app, pin_rect.center());
     assert!(!app.is_pinned());
+    assert!(!state.borrow().pinned);
+
+    // Pin -> error on unpin -> Unpin
+    let pin_rect = app.snapshot().pin_rect.unwrap();
     h.click(&mut app, pin_rect.center());
     assert!(app.is_pinned());
     assert!(state.borrow().pinned);
@@ -677,7 +708,7 @@ fn test_drag_categories_and_todos() {
         None,
     );
     let mut h = TestHarness::new(1200.0, 600.0);
-    h.pump(&mut app);
+    pump_unpinned(&mut h, &mut app);
 
     // Reorder C above A inside Life
     let life = &app.snapshot().category_panels[&life_id];
@@ -760,7 +791,7 @@ fn test_nested_scroll_propagates_at_edges() {
         None,
     );
     let mut h = TestHarness::new(400.0, 400.0);
-    h.pump(&mut app);
+    pump_unpinned(&mut h, &mut app);
 
     let inner_rect = app.snapshot().category_panels[&first_id].scroll_rect;
     h.scroll(&mut app, inner_rect.center(), vec2(0.0, -80.0));
@@ -800,7 +831,7 @@ fn test_drag_auto_scroll_targets() {
         None,
     );
     let mut h = TestHarness::new(400.0, 400.0);
-    h.pump(&mut app);
+    pump_unpinned(&mut h, &mut app);
 
     let outer_rect = app.snapshot().outer_scroll_rect;
     app.scroll_near(pos2(outer_rect.left() + 20.0, outer_rect.bottom() - 5.0));
@@ -843,7 +874,7 @@ fn test_wrapped_todos_resize_and_scroll() {
         None,
     );
     let mut h = TestHarness::new(400.0, 360.0);
-    h.pump(&mut app);
+    pump_unpinned(&mut h, &mut app);
 
     let verify = |app: &ScriviApp| {
         let panel = &app.snapshot().category_panels[&life_id];
@@ -1024,6 +1055,9 @@ fn test_category_grid_resizes_in_scroll() {
     let mut h = TestHarness::new(1200.0, 600.0);
 
     for width in [1200.0_f32, 400.0, 760.0, 1200.0] {
+        if width == 1200.0 && app.is_pinned() {
+            pump_unpinned(&mut h, &mut app);
+        }
         h.resize(&mut app, width, 600.0);
         let snap = app.snapshot();
         let last_card = snap.category_panels[&last_id].card_rect;
@@ -1085,7 +1119,7 @@ fn test_button_and_title_cursors() {
         None,
     );
     let mut h = TestHarness::new(760.0, 600.0);
-    h.pump(&mut app);
+    pump_unpinned(&mut h, &mut app);
     let title_rect = app.snapshot().category_panels[&cat_id].todo_rows[0]
         .1
         .title_rect;
@@ -1214,7 +1248,7 @@ fn test_layout_stays_within_window_right_edge() {
             None,
         );
         let mut h = TestHarness::new(760.0, 600.0);
-        h.pump(&mut app);
+        pump_unpinned(&mut h, &mut app);
 
         let draft_input = app.snapshot().category_panels[&first_id].todo_input_rect;
         h.replace_text(
@@ -1241,7 +1275,7 @@ fn test_layout_stays_within_window_right_edge() {
         None,
     );
     let mut h = TestHarness::new(760.0, 600.0);
-    h.pump(&mut app);
+    pump_unpinned(&mut h, &mut app);
 
     let edit_rect = app.snapshot().category_panels[&cat_id].todo_rows[0]
         .1
@@ -1255,4 +1289,167 @@ fn test_layout_stays_within_window_right_edge() {
             "EditTodo modal @ {width} overflows viewport: {modal_rect:?}"
         );
     }
+}
+
+#[test]
+fn test_pinned_category_stack_layout() {
+    for (count, avail, min_h) in [
+        (1usize, vec2(360.0, 300.0), 240.0),
+        (4usize, vec2(360.0, 300.0), 240.0),
+        (4usize, vec2(740.0, 520.0), 240.0),
+    ] {
+        let stack = compute_pinned_category_stack(count, avail, min_h, GRID_GAP);
+        assert_eq!(stack.columns, 1);
+        assert_eq!(stack.rows, count.max(1));
+        assert_eq!(stack.rects.len(), count);
+        let expected_h = avail.y.max(min_h);
+        assert_eq!(stack.rects[0], Rect::from_min_size(Pos2::ZERO, vec2(avail.x, expected_h)));
+        if count > 1 {
+            assert_eq!(
+                stack.rects[1],
+                Rect::from_min_size(pos2(0.0, expected_h + GRID_GAP), vec2(avail.x, expected_h))
+            );
+        }
+        let expected_content = (count as f32) * expected_h + (count as f32 - 1.0) * GRID_GAP;
+        assert!((stack.content_height - expected_content).abs() < 0.01);
+    }
+}
+
+#[test]
+fn test_pinned_mode_collapses_app_and_shows_single_scrollable_category() {
+    let mut db = MemoryDb::open_in_memory().unwrap();
+    let life_id = db.add_category("Life").unwrap();
+    let work_id = db.add_category("Work").unwrap();
+    let _home_id = db.add_category("Home").unwrap();
+    let _other_id = db.add_category("Other").unwrap();
+    let task_id = db.add_in_category("Pinned task", life_id).unwrap();
+    db.add_in_category("Second cat task", work_id).unwrap();
+
+    let state = Rc::new(RefCell::new(MockPlatformState::default()));
+    let mut app = ScriviApp::new(
+        db,
+        Box::new(MockPlatform {
+            state: state.clone(),
+        }),
+        None,
+    );
+    let mut h = TestHarness::new(PINNED_WINDOW_WIDTH, PINNED_WINDOW_HEIGHT);
+    h.pump(&mut app);
+
+    // Starts pinned and collapsed with only the first category visible
+    assert!(app.is_pinned());
+    assert!(state.borrow().pinned);
+    assert_eq!(app.outer_scroll_offset(), 0.0);
+
+    let snap = app.snapshot();
+    assert!(snap.pin_rect.is_some());
+    assert!(snap.settings_rect.is_none());
+    assert!(snap.new_cat_emoji_rect.is_none());
+    assert!(snap.new_cat_input_rect.is_none());
+    assert!(snap.new_cat_add_rect.is_none());
+
+    let outer = snap.outer_scroll_rect;
+    let life_panel = &snap.category_panels[&life_id];
+    let work_panel = &snap.category_panels[&work_id];
+    assert!(
+        (life_panel.card_rect.top() - outer.top()).abs() < 1.0,
+        "first category does not start at top of pinned scroll area"
+    );
+    assert!(
+        (life_panel.card_rect.bottom() - outer.bottom()).abs() < 1.0,
+        "first category does not fill pinned scroll area height"
+    );
+    assert!(
+        life_panel.card_rect.right() <= PINNED_WINDOW_WIDTH - 8.0 + 0.01,
+        "first category exceeds pinned window right margin"
+    );
+    assert!(
+        work_panel.card_rect.top() >= outer.bottom() + GRID_GAP - 1.0,
+        "second category should start below the visible pinned viewport"
+    );
+
+    // Can still interact with todos in the first category while pinned
+    let todo_title = life_panel.todo_rows[0].1.title_rect;
+    h.click(&mut app, todo_title.center());
+    assert!(app.db().unwrap().todo(task_id).unwrap().done);
+
+    // Scrolling down reveals the next category
+    let scroll_point = app.snapshot().category_panels[&life_id].scroll_rect.center();
+    for _ in 0..8 {
+        h.scroll(&mut app, scroll_point, vec2(0.0, -80.0));
+    }
+    assert!(
+        app.outer_scroll_offset() > 0.0,
+        "pinned view did not scroll to subsequent categories"
+    );
+    let snap = app.snapshot();
+    let outer = snap.outer_scroll_rect;
+    let work_rect = snap.category_panels[&work_id].card_rect;
+    assert!(
+        work_rect.top() < outer.bottom() && work_rect.bottom() > outer.top(),
+        "second category did not scroll into pinned viewport: work={work_rect:?}, outer={outer:?}"
+    );
+
+    // Unpin restores full header and multi-column layout
+    let pin_rect = app.snapshot().pin_rect.unwrap();
+    h.click(&mut app, pin_rect.center());
+    assert!(!app.is_pinned());
+    assert!(!state.borrow().pinned);
+    h.resize(&mut app, 760.0, 600.0);
+
+    let snap = app.snapshot();
+    assert!(snap.settings_rect.is_some());
+    assert!(snap.new_cat_emoji_rect.is_some());
+    assert!(snap.new_cat_input_rect.is_some());
+    assert!(snap.new_cat_add_rect.is_some());
+    let life_restored = snap.category_panels[&life_id].card_rect;
+    let work_restored = snap.category_panels[&work_id].card_rect;
+    assert!((life_restored.top() - work_restored.top()).abs() < 1.0);
+    assert!(work_restored.left() > life_restored.right());
+
+    // Scrolling while unpinned and re-pinning resets outer scroll to first category and collapses again
+    app.set_outer_scroll_offset_for_test(100.0);
+    h.pump(&mut app);
+    let pin_rect = app.snapshot().pin_rect.unwrap();
+    h.click(&mut app, pin_rect.center());
+    assert!(app.is_pinned());
+    assert!(state.borrow().pinned);
+    assert_eq!(app.outer_scroll_offset(), 0.0);
+
+    h.resize(&mut app, PINNED_WINDOW_WIDTH, PINNED_WINDOW_HEIGHT);
+    let snap = app.snapshot();
+    assert!(snap.settings_rect.is_none());
+    assert!(snap.new_cat_add_rect.is_none());
+    let outer = snap.outer_scroll_rect;
+    assert!((snap.category_panels[&life_id].card_rect.top() - outer.top()).abs() < 1.0);
+    assert!(snap.category_panels[&work_id].card_rect.top() >= outer.bottom() + GRID_GAP - 1.0);
+}
+
+#[test]
+fn test_startup_pin_failure_leaves_app_unpinned() {
+    let state = Rc::new(RefCell::new(MockPlatformState {
+        fail_pin: true,
+        ..Default::default()
+    }));
+    let mut app = new_app(Box::new(MockPlatform {
+        state: state.clone(),
+    }));
+    let mut h = TestHarness::new(760.0, 600.0);
+    h.pump(&mut app);
+
+    assert!(!app.is_pinned());
+    assert!(!state.borrow().pinned);
+    assert_eq!(app.active_modal_title(), Some("Error"));
+    let ok_rect = find_modal_button(&app, "OK");
+    h.click(&mut app, ok_rect.center());
+
+    assert!(app.active_modal_title().is_none());
+    assert!(!app.is_pinned());
+    assert!(app.snapshot().settings_rect.is_some());
+
+    state.borrow_mut().fail_pin = false;
+    let pin_rect = app.snapshot().pin_rect.unwrap();
+    h.click(&mut app, pin_rect.center());
+    assert!(app.is_pinned());
+    assert!(state.borrow().pinned);
 }

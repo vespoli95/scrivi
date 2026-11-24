@@ -10,7 +10,8 @@ use egui::{
 use crate::icons;
 use crate::layout::{
     compute_category_drop_index, compute_category_grid, compute_heading_layout,
-    compute_todo_drop_index, CELL_MIN_HEIGHT, CELL_MIN_WIDTH, GRID_GAP,
+    compute_pinned_category_stack, compute_todo_drop_index, CELL_MIN_HEIGHT, CELL_MIN_WIDTH,
+    GRID_GAP,
 };
 use crate::options::WindowPlatform;
 use crate::store::{MemoryDb, Todo, CATEGORY_EMOJIS};
@@ -176,6 +177,7 @@ pub struct ScriviApp {
     db: Option<MemoryDb>,
     platform: Box<dyn WindowPlatform>,
     pinned: bool,
+    pending_startup_pin: bool,
     new_category_name: String,
     new_category_icon: String,
     focus_new_category: bool,
@@ -210,10 +212,12 @@ impl ScriviApp {
         updates: Option<UpdateController>,
     ) -> Self {
         let theme = db.app_theme().to_string();
+        let pending_startup_pin = platform.supports_pin();
         Self {
             db: Some(db),
             platform,
             pinned: false,
+            pending_startup_pin,
             new_category_name: String::new(),
             new_category_icon: String::new(),
             focus_new_category: false,
@@ -252,6 +256,7 @@ impl ScriviApp {
             db: None,
             platform,
             pinned: false,
+            pending_startup_pin: false,
             new_category_name: String::new(),
             new_category_icon: String::new(),
             focus_new_category: false,
@@ -607,6 +612,19 @@ impl ScriviApp {
     }
 
     pub fn render(&mut self, ctx: &egui::Context) {
+        if self.pending_startup_pin {
+            self.pending_startup_pin = false;
+            if self.platform.supports_pin() && !self.pinned {
+                match self.platform.set_pinned_on_startup(ctx) {
+                    Ok(()) => {
+                        self.pinned = true;
+                        self.outer_scroll_offset = 0.0;
+                    }
+                    Err(err) => self.push_error(err),
+                }
+            }
+        }
+
         self.poll_updates(ctx);
 
         let theme_name = self.current_theme_name().to_string();
@@ -626,14 +644,20 @@ impl ScriviApp {
 
         let p = palette(&theme_name);
         let has_modal = !self.modals.is_empty();
+        let panel_margin = if self.pinned { 8 } else { 12 };
+        let header_gap = if self.pinned { 6.0 } else { 10.0 };
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(p.background).inner_margin(12))
+            .frame(
+                egui::Frame::new()
+                    .fill(p.background)
+                    .inner_margin(panel_margin),
+            )
             .show(ctx, |ui| {
                 let panel_inner_rect = ui.max_rect();
                 ui.add_enabled_ui(!has_modal, |ui| {
                     self.render_header(ui, &theme_name);
-                    ui.add_space(10.0);
+                    ui.add_space(header_gap);
                     self.render_category_grid(ui, panel_inner_rect, &theme_name);
                 });
             });
@@ -647,8 +671,56 @@ impl ScriviApp {
         self.last_cursor_icon = ctx.output(|o| o.cursor_icon);
     }
 
+    fn render_pin_button(&mut self, ui: &mut Ui, theme_name: &str) {
+        if !self.platform.supports_pin() {
+            return;
+        }
+        let pin_label = if self.pinned { "Unpin" } else { "Pin" };
+        let importance = if self.pinned {
+            ButtonImportance::High
+        } else {
+            ButtonImportance::Medium
+        };
+        let pin_resp = icon_text_button(
+            ui,
+            pin_label,
+            importance,
+            theme_name,
+            icons::paint_pin,
+        );
+        self.snapshot.pin_rect = Some(pin_resp.rect);
+        if pin_resp.clicked() {
+            let next = !self.pinned;
+            match self.platform.set_pinned(ui.ctx(), next) {
+                Ok(()) => {
+                    self.pinned = next;
+                    if next {
+                        self.outer_scroll_offset = 0.0;
+                    }
+                }
+                Err(err) => self.push_error(err),
+            }
+        }
+    }
+
     fn render_header(&mut self, ui: &mut Ui, theme_name: &str) {
         let p = palette(theme_name);
+        if self.pinned {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("scrivi")
+                        .size(16.0)
+                        .strong()
+                        .italics()
+                        .color(p.foreground),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.render_pin_button(ui, theme_name);
+                });
+            });
+            return;
+        }
+
         ui.vertical(|ui| {
             // Top bar: title + Pin/Settings
             ui.horizontal(|ui| {
@@ -674,27 +746,7 @@ impl ScriviApp {
 
                     if self.platform.supports_pin() {
                         ui.add_space(6.0);
-                        let pin_label = if self.pinned { "Unpin" } else { "Pin" };
-                        let importance = if self.pinned {
-                            ButtonImportance::High
-                        } else {
-                            ButtonImportance::Medium
-                        };
-                        let pin_resp = icon_text_button(
-                            ui,
-                            pin_label,
-                            importance,
-                            theme_name,
-                            icons::paint_pin,
-                        );
-                        self.snapshot.pin_rect = Some(pin_resp.rect);
-                        if pin_resp.clicked() {
-                            let next = !self.pinned;
-                            match self.platform.set_pinned(ui.ctx(), next) {
-                                Ok(()) => self.pinned = next,
-                                Err(err) => self.push_error(err),
-                            }
-                        }
+                        self.render_pin_button(ui, theme_name);
                     }
                 });
             });
@@ -801,12 +853,21 @@ impl ScriviApp {
             .vertical_scroll_offset(self.outer_scroll_offset)
             .show(ui, |ui| {
                 let grid_width = ui.available_width().min(avail_rect.width()).max(0.0);
-                let grid = compute_category_grid(
-                    groups.len(),
-                    vec2(grid_width, avail_rect.height()),
-                    vec2(CELL_MIN_WIDTH, CELL_MIN_HEIGHT),
-                    GRID_GAP,
-                );
+                let grid = if self.pinned {
+                    compute_pinned_category_stack(
+                        groups.len(),
+                        vec2(grid_width, avail_rect.height()),
+                        CELL_MIN_HEIGHT,
+                        GRID_GAP,
+                    )
+                } else {
+                    compute_category_grid(
+                        groups.len(),
+                        vec2(grid_width, avail_rect.height()),
+                        vec2(CELL_MIN_WIDTH, CELL_MIN_HEIGHT),
+                        GRID_GAP,
+                    )
+                };
                 grid_columns = grid.columns;
                 grid_content_height = grid.content_height;
 
@@ -1507,31 +1568,37 @@ impl ScriviApp {
                 ui.add_space(10.0);
 
                 let cols = 6usize;
-                for row in CATEGORY_EMOJIS.chunks(cols) {
-                    ui.horizontal(|ui| {
-                        for &emoji in row {
-                            let resp = emoji_button(
-                                ui,
-                                emoji,
-                                selected == emoji,
-                                vec2(48.0, 48.0),
-                                theme_name,
-                            );
-                            if is_top {
-                                self.snapshot
-                                    .modal_emoji_rects
-                                    .push((emoji.to_string(), resp.rect));
-                            }
-                            if resp.clicked() {
-                                *out = Some(ModalResult::PickEmoji {
-                                    target: target.clone(),
-                                    emoji: emoji.to_string(),
-                                });
-                            }
+                let max_emoji_scroll_h = (ui.ctx().screen_rect().height() - 160.0).max(120.0);
+                ScrollArea::vertical()
+                    .id_salt("emoji_picker_scroll")
+                    .max_height(max_emoji_scroll_h)
+                    .show(ui, |ui| {
+                        for row in CATEGORY_EMOJIS.chunks(cols) {
+                            ui.horizontal(|ui| {
+                                for &emoji in row {
+                                    let resp = emoji_button(
+                                        ui,
+                                        emoji,
+                                        selected == emoji,
+                                        vec2(48.0, 48.0),
+                                        theme_name,
+                                    );
+                                    if is_top {
+                                        self.snapshot
+                                            .modal_emoji_rects
+                                            .push((emoji.to_string(), resp.rect));
+                                    }
+                                    if resp.clicked() {
+                                        *out = Some(ModalResult::PickEmoji {
+                                            target: target.clone(),
+                                            emoji: emoji.to_string(),
+                                        });
+                                    }
+                                }
+                            });
+                            ui.add_space(4.0);
                         }
                     });
-                    ui.add_space(4.0);
-                }
 
                 ui.add_space(8.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

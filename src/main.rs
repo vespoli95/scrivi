@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use scrivi::icons;
+use scrivi::layout;
 use scrivi::options;
 use scrivi::store;
 use scrivi::theme;
@@ -10,7 +11,14 @@ use scrivi::ui::ScriviApp;
 use scrivi::updates::UpdateController;
 
 fn main() -> eframe::Result {
-    let mut viewport = egui::ViewportBuilder::default().with_inner_size([760.0, 600.0]);
+    #[cfg(windows)]
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([layout::PINNED_WINDOW_WIDTH, layout::PINNED_WINDOW_HEIGHT])
+        .with_position([0.0, 0.0])
+        .with_always_on_top();
+    #[cfg(not(windows))]
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([layout::DEFAULT_WINDOW_WIDTH, layout::DEFAULT_WINDOW_HEIGHT]);
     if let Some(icon) = icons::load_app_icon() {
         viewport = viewport.with_icon(Arc::new(icon));
     }
