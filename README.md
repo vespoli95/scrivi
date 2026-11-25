@@ -4,9 +4,13 @@ A tiny Rust desktop todo list built with `eframe` / `egui`. Add todos with the A
 Enter (and use Shift+Enter for line breaks), check them off, and delete them with the trash button.
 
 Create categories, such as Life, Money, or Work, using **Add category** or Enter.
-Each category has its own todo entry and scrollable list. Use a todo's edit
-button to change its text. Long todos wrap onto multiple lines. Drag the dotted
-handles to reorder categories or todos, or to move a todo to another category.
+Each category has its own todo entry and scrollable list. Use the sub-category
+button beside the todo input to add a checkable sub-category heading (such as
+"To buy" under Life) with indented items underneath it; checking off a
+sub-category toggles all of its items, and you can add more items to it with its
+`+` button or drag items into and out of it. Use a todo's edit button to change
+its text. Long todos wrap onto multiple lines. Drag the dotted handles to reorder
+categories or todos, or to move a todo or sub-category to another category.
 The palette button changes a category's color; **Settings** changes the app
 theme. These choices and ordering are saved across restarts. Deleting a category
 also deletes its todos after confirmation. Older unassigned todos, if any, are

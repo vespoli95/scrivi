@@ -144,6 +144,22 @@ pub fn paint_plus(ui: &Ui, rect: Rect, color: Color32) {
     p.line_segment([pos2(c.x, c.y - r), pos2(c.x, c.y + r)], stroke);
 }
 
+/// A heading bar with two indented bullet rows, used for "add sub-category".
+pub fn paint_subcategory(ui: &Ui, rect: Rect, color: Color32) {
+    let p = ui.painter();
+    let s = rect.width().min(rect.height());
+    let c = rect.center();
+    let stroke = Stroke::new((s * 0.11).max(1.6), color);
+    let left = c.x - s * 0.34;
+    let right = c.x + s * 0.34;
+    let top = c.y - s * 0.26;
+    p.line_segment([pos2(left, top), pos2(right, top)], stroke);
+    for y in [c.y + s * 0.02, c.y + s * 0.28] {
+        p.circle_filled(pos2(left + s * 0.18, y), (s * 0.07).max(1.2), color);
+        p.line_segment([pos2(left + s * 0.34, y), pos2(right, y)], stroke);
+    }
+}
+
 pub fn paint_check(ui: &Ui, rect: Rect, color: Color32) {
     let p = ui.painter();
     let s = rect.width().min(rect.height());

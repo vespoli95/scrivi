@@ -10,8 +10,8 @@ use egui::{
 use crate::icons;
 use crate::layout::{
     compute_category_drop_index, compute_category_grid, compute_heading_layout,
-    compute_pinned_category_stack, compute_todo_drop_index, CELL_MIN_HEIGHT, CELL_MIN_WIDTH,
-    GRID_GAP,
+    compute_nested_todo_drop, compute_pinned_category_stack, TodoDropRow, CELL_MIN_HEIGHT,
+    CELL_MIN_WIDTH, GRID_GAP, SUBTODO_INDENT,
 };
 use crate::options::WindowPlatform;
 use crate::store::{MemoryDb, Todo, CATEGORY_EMOJIS};
@@ -42,6 +42,12 @@ pub struct TodoRowRects {
     pub title_rect: Rect,
     pub edit_rect: Rect,
     pub delete_rect: Rect,
+    /// "Add item" button shown on sub-category headings.
+    pub add_child_rect: Option<Rect>,
+    /// Horizontal indent of the row content (non-zero for todos nested in a sub-category).
+    pub indent: f32,
+    pub is_group: bool,
+    pub parent_id: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -55,6 +61,11 @@ pub struct CategoryPanelRects {
     pub delete_rect: Rect,
     pub todo_input_rect: Rect,
     pub todo_add_rect: Rect,
+    pub subcategory_add_rect: Rect,
+    /// Inline entry for adding a todo into the open sub-category, when shown.
+    pub child_entry_rect: Option<Rect>,
+    /// Inline "+" button next to the open sub-category entry, when shown.
+    pub child_add_rect: Option<Rect>,
     pub scroll_rect: Rect,
     pub content_height: f32,
     pub todo_rows: Vec<(i64, TodoRowRects)>,
@@ -128,6 +139,7 @@ enum EmojiTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ConfirmKind {
     DeleteCategory(i64),
+    DeleteSubcategory(i64),
     InstallUpdate {
         version: String,
         download_url: String,
@@ -157,6 +169,7 @@ enum Modal {
         todo_id: i64,
         draft: String,
         request_focus: bool,
+        is_group: bool,
     },
     Settings {
         startup_checked: bool,
@@ -183,6 +196,9 @@ pub struct ScriviApp {
     focus_new_category: bool,
     todo_drafts: HashMap<i64, String>,
     focus_todo_entry: Option<i64>,
+    child_drafts: HashMap<i64, String>,
+    child_entry_open: Option<i64>,
+    focus_child_entry: bool,
     outer_scroll_offset: f32,
     outer_content_height: f32,
     outer_scroll_rect: Rect,
@@ -191,7 +207,7 @@ pub struct ScriviApp {
     inner_scroll_rects: HashMap<i64, Rect>,
     grid_columns: usize,
     category_rects: HashMap<i64, Rect>,
-    todo_row_rects: HashMap<i64, Vec<(i64, Rect)>>,
+    todo_row_rects: HashMap<i64, Vec<TodoDropRow>>,
     active_drag: Option<DragPayload>,
     hovered_category: Option<i64>,
     last_drag_pos: Option<Pos2>,
@@ -223,6 +239,9 @@ impl ScriviApp {
             focus_new_category: false,
             todo_drafts: HashMap::new(),
             focus_todo_entry: None,
+            child_drafts: HashMap::new(),
+            child_entry_open: None,
+            focus_child_entry: false,
             outer_scroll_offset: 0.0,
             outer_content_height: 0.0,
             outer_scroll_rect: Rect::NOTHING,
@@ -262,6 +281,9 @@ impl ScriviApp {
             focus_new_category: false,
             todo_drafts: HashMap::new(),
             focus_todo_entry: None,
+            child_drafts: HashMap::new(),
+            child_entry_open: None,
+            focus_child_entry: false,
             outer_scroll_offset: 0.0,
             outer_content_height: 0.0,
             outer_scroll_rect: Rect::NOTHING,
@@ -354,6 +376,18 @@ impl ScriviApp {
     pub fn todo_draft(&self, category_id: i64) -> &str {
         self.todo_drafts
             .get(&category_id)
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+
+    /// Sub-category whose inline "add item" entry is currently shown.
+    pub fn child_entry_open(&self) -> Option<i64> {
+        self.child_entry_open
+    }
+
+    pub fn child_draft(&self, group_id: i64) -> &str {
+        self.child_drafts
+            .get(&group_id)
             .map(String::as_str)
             .unwrap_or("")
     }
@@ -567,11 +601,19 @@ impl ScriviApp {
             .get(&target_cat_id)
             .cloned()
             .unwrap_or_default();
-        let index = compute_todo_drop_index(&row_rects, id, point);
+        let nest_x = self
+            .inner_scroll_rects
+            .get(&target_cat_id)
+            .map(|r| r.left())
+            .unwrap_or(0.0)
+            + SUBTODO_INDENT;
         let Some(db) = self.db.as_mut() else {
             return;
         };
-        if let Err(err) = db.move_todo(id, target_cat_id, index as isize) {
+        let dragging_group = db.todo(id).is_some_and(|t| t.is_group);
+        let target = compute_nested_todo_drop(&row_rects, id, dragging_group, point, nest_x);
+        if let Err(err) = db.move_todo_to(id, target_cat_id, target.parent_id, target.index as isize)
+        {
             self.push_error(err.to_string());
         }
     }
@@ -828,6 +870,11 @@ impl ScriviApp {
             .retain(|id, _| groups.iter().any(|g| g.id == *id));
         self.inner_scroll_offsets
             .retain(|id, _| groups.iter().any(|g| g.id == *id));
+        let is_live_group = |id: i64| db.todo(id).is_some_and(|t| t.is_group);
+        self.child_drafts.retain(|id, _| is_live_group(*id));
+        if self.child_entry_open.is_some_and(|id| !is_live_group(id)) {
+            self.child_entry_open = None;
+        }
 
         if groups.is_empty() {
             let mut scroll_ui = ui.new_child(egui::UiBuilder::new().max_rect(avail_rect));
@@ -1081,8 +1128,10 @@ impl ScriviApp {
         }
 
         let add_side = 36.0;
+        let add_gap = 4.0;
         let spacing = card_ui.spacing().item_spacing.x;
-        let entry_outer_width = (inner_rect.width() - add_side - spacing).max(24.0);
+        let entry_outer_width =
+            (inner_rect.width() - add_side * 2.0 - add_gap - spacing).max(24.0);
         let row_top = card_ui.cursor().top();
         let entry_max_rect = Rect::from_min_max(
             pos2(inner_rect.left(), row_top),
@@ -1127,8 +1176,27 @@ impl ScriviApp {
         );
         let todo_add_rect = add_resp.rect;
 
+        let sub_rect = Rect::from_min_size(
+            pos2(add_rect.left() - add_gap - add_side, row_top),
+            vec2(add_side, row_height),
+        );
+        let sub_resp = icon_button_in_rect(
+            &mut card_ui,
+            sub_rect,
+            Id::new(("todo_add_sub_btn", group.id)),
+            ButtonImportance::Medium,
+            theme_name,
+            icons::paint_subcategory,
+        )
+        .on_hover_text("Add as sub-category");
+        let subcategory_add_rect = sub_resp.rect;
+
         if enter_submit || add_resp.clicked() {
             actions.push(UiAction::AddTodo {
+                category_id: group.id,
+            });
+        } else if sub_resp.clicked() {
+            actions.push(UiAction::AddSubcategory {
                 category_id: group.id,
             });
         }
@@ -1148,11 +1216,26 @@ impl ScriviApp {
         );
         self.inner_scroll_rects.insert(group.id, scroll_avail);
 
-        let items = self
+        let tree: Vec<(Todo, Vec<Todo>)> = self
             .db
             .as_ref()
-            .map(|db| db.list_category_todos(group.id))
+            .map(|db| {
+                db.list_category_todos(group.id)
+                    .into_iter()
+                    .map(|item| {
+                        let children = if item.is_group {
+                            db.list_subcategory_todos(item.id)
+                        } else {
+                            Vec::new()
+                        };
+                        (item, children)
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
+        let open_entry = self
+            .child_entry_open
+            .filter(|gid| tree.iter().any(|(item, _)| item.id == *gid));
 
         let prev_inner_offset = self
             .inner_scroll_offsets
@@ -1162,6 +1245,8 @@ impl ScriviApp {
 
         let mut row_rects_for_drop = Vec::new();
         let mut todo_rows_snapshot = Vec::new();
+        let mut child_entry_rect = None;
+        let mut child_add_rect = None;
 
         let inner_scroll_out = ScrollArea::vertical()
             .id_salt(("cat_todos_scroll", group.id))
@@ -1170,25 +1255,45 @@ impl ScriviApp {
             .vertical_scroll_offset(prev_inner_offset)
             .show(&mut card_ui, |ui| {
                 let list_width = ui.available_width().min(scroll_avail.width()).max(1.0);
-                if items.is_empty() {
+                if tree.is_empty() {
                     ui.label(
                         RichText::new("No todos yet. Add one above.").color(p.muted),
                     );
                     return;
                 }
-                for (idx, item) in items.iter().enumerate() {
+                for (idx, (item, children)) in tree.iter().enumerate() {
                     if idx > 0 {
                         ui.add_space(4.0);
                     }
-                    let row_rects = self.render_todo_row(
-                        ui,
-                        list_width,
-                        item,
-                        theme_name,
-                        actions,
-                    );
-                    row_rects_for_drop.push((item.id, row_rects.row_rect));
-                    todo_rows_snapshot.push((item.id, row_rects));
+                    let rows = std::iter::once((item, 0.0))
+                        .chain(children.iter().map(|child| (child, SUBTODO_INDENT)));
+                    for (row_idx, (row_item, indent)) in rows.enumerate() {
+                        if row_idx > 0 {
+                            ui.add_space(4.0);
+                        }
+                        let row_rects = self.render_todo_row(
+                            ui,
+                            list_width,
+                            row_item,
+                            indent,
+                            theme_name,
+                            actions,
+                        );
+                        row_rects_for_drop.push(TodoDropRow {
+                            id: row_item.id,
+                            rect: row_rects.row_rect,
+                            parent_id: row_item.parent_id,
+                            is_group: row_item.is_group,
+                        });
+                        todo_rows_snapshot.push((row_item.id, row_rects));
+                    }
+                    if open_entry == Some(item.id) {
+                        ui.add_space(4.0);
+                        let (entry_rect, add_rect) =
+                            self.render_child_entry(ui, list_width, item, theme_name, actions);
+                        child_entry_rect = Some(entry_rect);
+                        child_add_rect = Some(add_rect);
+                    }
                 }
             });
 
@@ -1212,17 +1317,103 @@ impl ScriviApp {
             delete_rect,
             todo_input_rect,
             todo_add_rect,
+            subcategory_add_rect,
+            child_entry_rect,
+            child_add_rect,
             scroll_rect: scroll_avail,
             content_height: inner_scroll_out.content_size.y,
             todo_rows: todo_rows_snapshot,
         }
     }
 
+    /// Inline, indented entry for adding a todo to the end of a sub-category.
+    fn render_child_entry(
+        &mut self,
+        ui: &mut Ui,
+        list_width: f32,
+        group: &Todo,
+        theme_name: &str,
+        actions: &mut Vec<UiAction>,
+    ) -> (Rect, Rect) {
+        let p = palette(theme_name);
+        let focus_now = std::mem::take(&mut self.focus_child_entry);
+        let draft = self.child_drafts.entry(group.id).or_default();
+        let row_left = ui.cursor().left();
+        let row_top = ui.cursor().top();
+        let btn_side = 26.0;
+        let gap = 4.0;
+        let entry_outer_width = (list_width - SUBTODO_INDENT - btn_side - gap).max(24.0);
+        let entry_left = row_left + SUBTODO_INDENT;
+        let entry_max_rect = Rect::from_min_max(
+            pos2(entry_left, row_top),
+            pos2(
+                entry_left + entry_outer_width,
+                ui.max_rect().bottom().max(row_top + 200.0),
+            ),
+        );
+        let hint = format!("Add to {}…", group.title);
+        let mut entry_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(entry_max_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        entry_ui.set_clip_rect(ui.clip_rect().intersect(Rect::from_min_max(
+            pos2(entry_left - 1.0, row_top - 1.0),
+            pos2(entry_max_rect.right() + 1.0, entry_max_rect.bottom()),
+        )));
+        let (resp, submit) = render_multiline_submit_entry(
+            &mut entry_ui,
+            Id::new(("child_entry", group.id)),
+            draft,
+            &hint,
+            entry_outer_width,
+            1,
+            focus_now,
+        );
+        let row_height = entry_ui.min_rect().height().max(btn_side);
+
+        let guide_x = row_left + 22.0 * 0.5;
+        ui.painter().line_segment(
+            [pos2(guide_x, row_top - 4.0), pos2(guide_x, row_top + row_height)],
+            Stroke::new(1.5_f32, p.border),
+        );
+
+        let add_rect = Rect::from_min_size(
+            pos2(row_left + list_width - btn_side, row_top),
+            vec2(btn_side, row_height),
+        );
+        let add_resp = icon_button_in_rect(
+            ui,
+            add_rect,
+            Id::new(("child_add_btn", group.id)),
+            ButtonImportance::High,
+            theme_name,
+            icons::paint_plus,
+        );
+        ui.advance_cursor_after_rect(Rect::from_min_size(
+            pos2(row_left, row_top),
+            vec2(list_width, row_height),
+        ));
+
+        let escape = ui.input(|i| i.key_pressed(Key::Escape));
+        let reopened_this = actions.iter().any(|a| {
+            matches!(a, UiAction::OpenChildEntry { group_id } if *group_id == group.id)
+        });
+        if submit || add_resp.clicked() {
+            actions.push(UiAction::AddChildTodo { group_id: group.id });
+        } else if !reopened_this && resp.lost_focus() && (escape || draft.trim().is_empty()) {
+            actions.push(UiAction::CloseChildEntry { group_id: group.id });
+        }
+        (resp.rect, add_resp.rect)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn render_todo_row(
         &mut self,
         ui: &mut Ui,
         row_width: f32,
         item: &Todo,
+        indent: f32,
         theme_name: &str,
         actions: &mut Vec<UiAction>,
     ) -> TodoRowRects {
@@ -1231,15 +1422,17 @@ impl ScriviApp {
         let check_side = 20.0;
         let btn_side = 26.0;
         let gap = 6.0;
+        let btn_count = if item.is_group { 3.0 } else { 2.0 };
         let left_width = handle_side + gap + check_side;
-        let right_width = btn_side + 4.0 + btn_side;
-        let title_width = (row_width - left_width - right_width - 2.0 * gap).max(1.0);
+        let right_width = btn_side * btn_count + 4.0 * (btn_count - 1.0);
+        let content_width = (row_width - indent).max(1.0);
+        let title_width = (content_width - left_width - right_width - 2.0 * gap).max(1.0);
         let inner_pad_x = 4.0;
         let inner_pad_y = 4.0;
         let wrap_width = (title_width - inner_pad_x * 2.0).max(1.0);
 
         let ink = if item.done { p.muted } else { p.foreground };
-        let font_id = FontId::proportional(14.0);
+        let font_id = FontId::proportional(if item.is_group { 15.5 } else { 14.0 });
         let galley = layout_todo_galley(ui, &item.title, wrap_width, font_id, ink);
         let required_title_height = galley.size().y + inner_pad_y * 2.0;
         let row_height = handle_side
@@ -1248,9 +1441,26 @@ impl ScriviApp {
             .max(required_title_height);
 
         let (row_rect, _) = ui.allocate_exact_size(vec2(row_width, row_height), Sense::hover());
+        let content_left = row_rect.left() + indent;
+
+        if item.is_group {
+            ui.painter().rect_filled(
+                row_rect,
+                CornerRadius::same(6),
+                p.foreground.gamma_multiply(0.07),
+            );
+        }
+        if indent > 0.0 {
+            // Guide line under the sub-category's drag handle, joining nested rows.
+            let x = row_rect.left() + handle_side * 0.5;
+            ui.painter().line_segment(
+                [pos2(x, row_rect.top() - 4.0), pos2(x, row_rect.bottom())],
+                Stroke::new(1.5_f32, p.border),
+            );
+        }
 
         let handle_rect = Rect::from_min_size(
-            pos2(row_rect.left(), row_rect.center().y - handle_side * 0.5),
+            pos2(content_left, row_rect.center().y - handle_side * 0.5),
             vec2(handle_side, handle_side),
         );
         let handle_resp = ui
@@ -1331,6 +1541,28 @@ impl ScriviApp {
             actions.push(UiAction::OpenEditTodo { todo: item.clone() });
         }
 
+        let add_child_rect = if item.is_group {
+            let rect = Rect::from_min_size(
+                pos2(edit_rect.left() - 4.0 - btn_side, edit_rect.top()),
+                vec2(btn_side, btn_side),
+            );
+            let resp = icon_button_in_rect(
+                ui,
+                rect,
+                Id::new(("todo_add_child", item.id)),
+                ButtonImportance::Low,
+                theme_name,
+                icons::paint_plus,
+            )
+            .on_hover_text("Add an item to this sub-category");
+            if resp.clicked() {
+                actions.push(UiAction::OpenChildEntry { group_id: item.id });
+            }
+            Some(rect)
+        } else {
+            None
+        };
+
         let delete_resp = icon_button_in_rect(
             ui,
             delete_rect,
@@ -1340,7 +1572,23 @@ impl ScriviApp {
             icons::paint_trash,
         );
         if delete_resp.clicked() {
-            actions.push(UiAction::DeleteTodo { id: item.id });
+            let child_count = if item.is_group {
+                self.db
+                    .as_ref()
+                    .map(|db| db.list_subcategory_todos(item.id).len())
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            if child_count > 0 {
+                actions.push(UiAction::ConfirmDeleteSubcategory {
+                    id: item.id,
+                    name: item.title.clone(),
+                    child_count,
+                });
+            } else {
+                actions.push(UiAction::DeleteTodo { id: item.id });
+            }
         }
 
         TodoRowRects {
@@ -1350,11 +1598,65 @@ impl ScriviApp {
             title_rect,
             edit_rect,
             delete_rect,
+            add_child_rect,
+            indent,
+            is_group: item.is_group,
+            parent_id: item.parent_id,
         }
     }
 
     fn apply_action(&mut self, action: UiAction) {
         match action {
+            UiAction::AddSubcategory { category_id } => {
+                let text = self.todo_drafts.get(&category_id).cloned().unwrap_or_default();
+                let Some(db) = self.db.as_mut() else {
+                    return;
+                };
+                match db.add_subcategory(&text, category_id) {
+                    Ok(group_id) => {
+                        self.todo_drafts.insert(category_id, String::new());
+                        self.child_entry_open = Some(group_id);
+                        self.focus_child_entry = true;
+                    }
+                    Err(err) => self.push_error(err.to_string()),
+                }
+            }
+            UiAction::OpenChildEntry { group_id } => {
+                self.child_entry_open = Some(group_id);
+                self.focus_child_entry = true;
+            }
+            UiAction::CloseChildEntry { group_id } => {
+                if self.child_entry_open == Some(group_id) {
+                    self.child_entry_open = None;
+                }
+            }
+            UiAction::AddChildTodo { group_id } => {
+                let text = self.child_drafts.get(&group_id).cloned().unwrap_or_default();
+                let Some(db) = self.db.as_mut() else {
+                    return;
+                };
+                match db.add_in_subcategory(&text, group_id) {
+                    Ok(_) => {
+                        self.child_drafts.insert(group_id, String::new());
+                        self.focus_child_entry = true;
+                    }
+                    Err(err) => self.push_error(err.to_string()),
+                }
+            }
+            UiAction::ConfirmDeleteSubcategory {
+                id,
+                name,
+                child_count,
+            } => {
+                let noun = if child_count == 1 { "todo" } else { "todos" };
+                self.push_modal(Modal::Confirm {
+                    title: "Delete sub-category?".into(),
+                    message: format!(
+                        "Delete {name} and its {child_count} {noun}? This cannot be undone."
+                    ),
+                    kind: ConfirmKind::DeleteSubcategory(id),
+                });
+            }
             UiAction::AddTodo { category_id } => {
                 let text = self.todo_drafts.get(&category_id).cloned().unwrap_or_default();
                 let Some(db) = self.db.as_mut() else {
@@ -1389,6 +1691,7 @@ impl ScriviApp {
                     todo_id: todo.id,
                     draft: todo.title,
                     request_focus: true,
+                    is_group: todo.is_group,
                 });
             }
             UiAction::OpenCategoryEmojiPicker {
@@ -1683,15 +1986,21 @@ impl ScriviApp {
                 todo_id,
                 draft,
                 request_focus,
+                is_group,
             } => {
                 let modal_width = max_modal_width.clamp(240.0, 568.0);
                 ui.set_max_width(modal_width);
                 ui.set_min_size(vec2(modal_width, 288.0));
+                let heading = if *is_group {
+                    "Edit sub-category"
+                } else {
+                    "Edit todo"
+                };
                 if is_top {
-                    self.snapshot.modal_title = Some("Edit todo".into());
+                    self.snapshot.modal_title = Some(heading.into());
                 }
                 ui.label(
-                    RichText::new("Edit todo")
+                    RichText::new(heading)
                         .size(16.0)
                         .strong()
                         .color(p.foreground),
@@ -1700,11 +2009,16 @@ impl ScriviApp {
 
                 let focus_now = *request_focus;
                 *request_focus = false;
+                let hint = if *is_group {
+                    "Sub-category name"
+                } else {
+                    "What needs doing?"
+                };
                 let (entry_resp, enter_submit) = render_multiline_submit_entry(
                     ui,
                     Id::new(("edit_todo_input", *todo_id)),
                     draft,
-                    "What needs doing?",
+                    hint,
                     modal_width,
                     6,
                     focus_now,
@@ -1899,6 +2213,13 @@ impl ScriviApp {
                             }
                         }
                     }
+                    ConfirmKind::DeleteSubcategory(id) => {
+                        if let Some(db) = self.db.as_mut() {
+                            if let Err(err) = db.delete(id) {
+                                self.push_error(err.to_string());
+                            }
+                        }
+                    }
                     ConfirmKind::InstallUpdate { download_url, .. } => {
                         self.push_modal(Modal::DownloadingUpdate);
                         if let Some(ctrl) = &self.updates {
@@ -2002,8 +2323,13 @@ impl eframe::App for ScriviApp {
 
 enum UiAction {
     AddTodo { category_id: i64 },
+    AddSubcategory { category_id: i64 },
+    OpenChildEntry { group_id: i64 },
+    CloseChildEntry { group_id: i64 },
+    AddChildTodo { group_id: i64 },
     SetTodoDone { id: i64, done: bool },
     DeleteTodo { id: i64 },
+    ConfirmDeleteSubcategory { id: i64, name: String, child_count: usize },
     OpenEditTodo { todo: Todo },
     OpenCategoryEmojiPicker { category_id: i64, selected: String },
     OpenColorPicker { category_id: i64, selected: String },
