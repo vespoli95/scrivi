@@ -169,7 +169,7 @@ pub fn compute_todo_drop_index(row_rects: &[(i64, Rect)], dragged_id: i64, point
     index
 }
 
-/// Horizontal indentation applied to todos nested under a sub-category.
+/// Horizontal indentation applied to sub-items nested under another todo.
 pub const SUBTODO_INDENT: f32 = 28.0;
 
 /// A rendered todo row, in visual order, used for nested drop hit-testing.
@@ -178,28 +178,27 @@ pub struct TodoDropRow {
     pub id: i64,
     pub rect: Rect,
     pub parent_id: Option<i64>,
-    pub is_group: bool,
 }
 
 /// Where a dragged todo lands: `index` among the siblings under `parent_id`
-/// (a sub-category), or among the top-level items when `parent_id` is `None`.
+/// (a top-level todo), or among the top-level items when `parent_id` is `None`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TodoDropTarget {
     pub parent_id: Option<i64>,
     pub index: usize,
 }
 
-/// Resolves a drop point against a category's flattened rows.
+/// Resolves a drop point against a category's flattened rows (max nesting depth = 1).
 ///
-/// * Dropping onto the middle of a sub-category heading appends into it.
-/// * Dropping between nested rows inserts into that sub-category.
-/// * Dropping just below a sub-category's last row nests when the pointer is
-///   indented to at least `nest_x`; otherwise the todo lands at the top level.
-/// * Sub-categories themselves always land at the top level.
+/// * Dropping onto the middle of any top-level item nests under it at the end of its sub-items.
+/// * Dropping onto or between sub-items inserts into that parent's sub-items.
+/// * Dropping just below an item nests under its group when the pointer is indented to at least
+///   `nest_x`; dropping far below in empty space or un-indented lands at the top level.
+/// * Items that currently have sub-items cannot themselves be nested and always land at top level.
 pub fn compute_nested_todo_drop(
     rows: &[TodoDropRow],
     dragged_id: i64,
-    dragging_group: bool,
+    dragging_has_children: bool,
     point: Pos2,
     nest_x: f32,
 ) -> TodoDropTarget {
@@ -208,9 +207,9 @@ pub fn compute_nested_todo_drop(
         .filter(|r| r.id != dragged_id && r.parent_id != Some(dragged_id))
         .collect();
 
-    if !dragging_group {
-        for row in visible.iter().filter(|r| r.is_group) {
-            let band = row.rect.height() * 0.25;
+    if !dragging_has_children {
+        for row in visible.iter().filter(|r| r.parent_id.is_none()) {
+            let band = row.rect.height() * 0.28;
             if point.y >= row.rect.top() + band && point.y <= row.rect.bottom() - band {
                 let index = visible
                     .iter()
@@ -230,16 +229,17 @@ pub fn compute_nested_todo_drop(
         .unwrap_or(visible.len());
     let above = slot.checked_sub(1).map(|i| visible[i]);
     let below = visible.get(slot);
+    let near_above = below.is_some()
+        || above.is_some_and(|r| point.y <= r.rect.bottom() + r.rect.height() + 8.0);
 
-    let parent_id = if dragging_group {
+    let parent_id = if dragging_has_children {
         None
-    } else if let Some(group) = below.and_then(|r| r.parent_id) {
-        Some(group)
+    } else if let Some(parent) = below.and_then(|r| r.parent_id) {
+        Some(parent)
+    } else if near_above && point.x >= nest_x {
+        above.map(|r| r.parent_id.unwrap_or(r.id))
     } else {
-        match above.and_then(|r| if r.is_group { Some(r.id) } else { r.parent_id }) {
-            Some(group) if point.x >= nest_x => Some(group),
-            _ => None,
-        }
+        None
     };
     let index = visible[..slot]
         .iter()
@@ -252,24 +252,23 @@ pub fn compute_nested_todo_drop(
 mod tests {
     use super::*;
 
-    fn row(id: i64, y: f32, parent_id: Option<i64>, is_group: bool) -> TodoDropRow {
+    fn row(id: i64, y: f32, parent_id: Option<i64>) -> TodoDropRow {
         let left = if parent_id.is_some() { SUBTODO_INDENT } else { 0.0 };
         TodoDropRow {
             id,
             rect: Rect::from_min_max(pos2(left, y), pos2(300.0, y + 20.0)),
             parent_id,
-            is_group,
         }
     }
 
-    // A(1) top, G(2) group with children C1(3), C2(4), B(5) top
+    // A(1) top, G(2) top with children C1(3), C2(4), B(5) top
     fn sample() -> Vec<TodoDropRow> {
         vec![
-            row(1, 0.0, None, false),
-            row(2, 24.0, None, true),
-            row(3, 48.0, Some(2), false),
-            row(4, 72.0, Some(2), false),
-            row(5, 96.0, None, false),
+            row(1, 0.0, None),
+            row(2, 24.0, None),
+            row(3, 48.0, Some(2)),
+            row(4, 72.0, Some(2)),
+            row(5, 96.0, None),
         ]
     }
 
@@ -281,25 +280,40 @@ mod tests {
     fn test_nested_todo_drop_targets() {
         let rows = sample();
         let nest_x = SUBTODO_INDENT;
-        // Onto group heading middle -> append into group
+        // Onto middle of childless top-level item A(1) -> nests under A
+        assert_eq!(compute_nested_todo_drop(&rows, 5, false, pos2(10.0, 10.0), nest_x), target(Some(1), 0));
+        // Onto middle of parent item G(2) -> appends into G
         assert_eq!(compute_nested_todo_drop(&rows, 5, false, pos2(10.0, 34.0), nest_x), target(Some(2), 2));
-        // Between children -> into group
+        // Upper 25% of top-level item -> reorders above, does not nest
+        assert_eq!(compute_nested_todo_drop(&rows, 5, false, pos2(10.0, 5.0), nest_x), target(None, 0));
+        assert_eq!(compute_nested_todo_drop(&rows, 5, false, pos2(10.0, 29.0), nest_x), target(None, 1));
+        // Onto or between sub-items -> inserts as sibling under G (never depth 2)
+        assert_eq!(compute_nested_todo_drop(&rows, 1, false, pos2(10.0, 57.0), nest_x), target(Some(2), 0));
         assert_eq!(compute_nested_todo_drop(&rows, 1, false, pos2(10.0, 70.0), nest_x), target(Some(2), 1));
-        // Upper edge of group heading -> top level before group
-        assert_eq!(compute_nested_todo_drop(&rows, 5, false, pos2(10.0, 25.0), nest_x), target(None, 1));
-        // Below last child, not indented -> top level after group
+        // Below last child, not indented -> top level after G
         assert_eq!(compute_nested_todo_drop(&rows, 1, false, pos2(10.0, 94.0), nest_x), target(None, 1));
-        // Below last child, indented -> end of group
+        // Below last child, indented -> end of G
         assert_eq!(compute_nested_todo_drop(&rows, 1, false, pos2(40.0, 94.0), nest_x), target(Some(2), 2));
+        // Below childless top-level item B(5), near and indented -> nests under B
+        assert_eq!(compute_nested_todo_drop(&rows, 1, false, pos2(40.0, 120.0), nest_x), target(Some(5), 0));
+        // Far below last item in empty space, even if indented -> top level
+        assert_eq!(compute_nested_todo_drop(&rows, 1, false, pos2(40.0, 180.0), nest_x), target(None, 2));
         // Child dragged out to the very top
         assert_eq!(compute_nested_todo_drop(&rows, 3, false, pos2(10.0, 2.0), nest_x), target(None, 0));
-        // Groups never nest: dropping a group amid children lands after its host group
-        let mut with_other = rows.clone();
-        with_other.push(row(6, 120.0, None, true));
-        assert_eq!(compute_nested_todo_drop(&with_other, 6, true, pos2(40.0, 70.0), nest_x), target(None, 2));
-        assert_eq!(compute_nested_todo_drop(&with_other, 6, true, pos2(40.0, 34.0), nest_x), target(None, 2));
-        // Dragging a group ignores its own children
-        assert_eq!(compute_nested_todo_drop(&rows, 2, true, pos2(10.0, 200.0), nest_x), target(None, 2));
+        // Items with children never nest: dropping G amid or onto items stays top-level and ignores its own children
+        assert_eq!(compute_nested_todo_drop(&rows, 2, true, pos2(40.0, 4.0), nest_x), target(None, 0));
+        assert_eq!(compute_nested_todo_drop(&rows, 2, true, pos2(40.0, 12.0), nest_x), target(None, 1));
+        assert_eq!(compute_nested_todo_drop(&rows, 2, true, pos2(40.0, 200.0), nest_x), target(None, 2));
+        let with_other = vec![
+            row(1, 0.0, None),
+            row(2, 24.0, None),
+            row(3, 48.0, Some(2)),
+            row(4, 72.0, Some(2)),
+            row(5, 96.0, None),
+            row(6, 120.0, Some(5)),
+        ];
+        assert_eq!(compute_nested_todo_drop(&with_other, 5, true, pos2(40.0, 70.0), nest_x), target(None, 2));
+        assert_eq!(compute_nested_todo_drop(&with_other, 5, true, pos2(40.0, 34.0), nest_x), target(None, 2));
         // Empty list
         assert_eq!(compute_nested_todo_drop(&[], 9, false, pos2(0.0, 0.0), nest_x), target(None, 0));
     }

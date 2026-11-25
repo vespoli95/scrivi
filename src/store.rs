@@ -24,12 +24,9 @@ pub struct Todo {
     pub done: bool,
     pub category_id: i64,
     pub position: i64,
-    /// Sub-category this todo is nested under. Positions are ordered among siblings
-    /// sharing the same `(category_id, parent_id)`.
+    /// Parent todo this item is nested under (max nesting depth = 1). Positions are
+    /// ordered among siblings sharing the same `(category_id, parent_id)`.
     pub parent_id: Option<i64>,
-    /// True when this row is a checkable sub-category heading that can hold nested todos.
-    /// Sub-categories always live at the top level of a category (one nesting level).
-    pub is_group: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -174,13 +171,12 @@ impl MemoryDb {
 
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, title, done, COALESCE(category_id, 0), position, parent_id, is_group FROM todos",
+                    "SELECT id, title, done, COALESCE(category_id, 0), position, parent_id FROM todos",
                 )
                 .map_err(|e| StoreError::Storage(format!("load todos: {e}")))?;
             let rows = stmt
                 .query_map([], |row| {
                     let done_int: i64 = row.get(2)?;
-                    let group_int: i64 = row.get(6)?;
                     Ok(Todo {
                         id: row.get(0)?,
                         title: row.get(1)?,
@@ -188,7 +184,6 @@ impl MemoryDb {
                         category_id: row.get(3)?,
                         position: row.get(4)?,
                         parent_id: row.get(5)?,
-                        is_group: group_int != 0,
                     })
                 })
                 .map_err(|e| StoreError::Storage(format!("load todos: {e}")))?;
@@ -288,23 +283,13 @@ impl MemoryDb {
     }
 
     fn migrate_subcategories(&mut self) -> Result<(), StoreError> {
-        let conn = self.conn_mut()?;
-        let tx = conn
-            .transaction()
-            .map_err(|e| StoreError::Storage(format!("begin sub-category migration: {e}")))?;
-        let columns = [
-            ("parent_id", "INTEGER REFERENCES todos(id)"),
-            ("is_group", "INTEGER NOT NULL DEFAULT 0 CHECK (is_group IN (0, 1))"),
-        ];
-        for (name, definition) in columns {
-            if Self::table_has_column(&tx, "todos", name)? {
-                continue;
-            }
-            tx.execute_batch(&format!("ALTER TABLE todos ADD COLUMN {name} {definition}"))
-                .map_err(|e| StoreError::Storage(format!("migrate todos {name}: {e}")))?;
+        let conn = self.conn()?;
+        if !Self::table_has_column(conn, "todos", "parent_id")? {
+            conn.execute_batch(
+                "ALTER TABLE todos ADD COLUMN parent_id INTEGER REFERENCES todos(id)",
+            )
+            .map_err(|e| StoreError::Storage(format!("migrate todos parent_id: {e}")))?;
         }
-        tx.commit()
-            .map_err(|e| StoreError::Storage(format!("save sub-category migration: {e}")))?;
         Ok(())
     }
 
@@ -411,44 +396,9 @@ impl MemoryDb {
     }
 
     pub fn add_in_category(&mut self, title: &str, category_id: i64) -> Result<i64, StoreError> {
-        self.insert_todo(title, category_id, None, false)
-    }
-
-    /// Adds a checkable sub-category heading at the end of a category's top-level list.
-    pub fn add_subcategory(&mut self, title: &str, category_id: i64) -> Result<i64, StoreError> {
-        self.insert_todo(title, category_id, None, true)
-    }
-
-    /// Adds a todo nested at the end of the given sub-category.
-    pub fn add_in_subcategory(&mut self, title: &str, group_id: i64) -> Result<i64, StoreError> {
-        let group = self.group(group_id)?;
-        self.insert_todo(title, group.category_id, Some(group_id), false)
-    }
-
-    fn group(&self, id: i64) -> Result<&Todo, StoreError> {
-        match self.todos.get(&id) {
-            Some(item) if item.is_group => Ok(item),
-            Some(_) => Err(StoreError::Validation(
-                "todos can only be nested under a sub-category".into(),
-            )),
-            None => Err(StoreError::TodoNotFound),
-        }
-    }
-
-    fn insert_todo(
-        &mut self,
-        title: &str,
-        category_id: i64,
-        parent_id: Option<i64>,
-        is_group: bool,
-    ) -> Result<i64, StoreError> {
         let title = title.trim().to_string();
         if title.is_empty() {
-            return Err(StoreError::Validation(if is_group {
-                "enter a sub-category name first".into()
-            } else {
-                "enter a todo first".into()
-            }));
+            return Err(StoreError::Validation("enter a todo first".into()));
         }
         if !self.categories.contains_key(&category_id) {
             return Err(StoreError::CategoryNotFound);
@@ -456,40 +406,18 @@ impl MemoryDb {
         let position = self
             .todos
             .values()
-            .filter(|t| t.category_id == category_id && t.parent_id == parent_id)
+            .filter(|t| t.category_id == category_id && t.parent_id.is_none())
             .map(|t| t.position + 1)
             .max()
             .unwrap_or(0);
 
-        let uncheck_parent = parent_id.filter(|p| self.todos.get(p).is_some_and(|g| g.done));
-        let id = if let Some(parent) = uncheck_parent {
-            let conn = self.conn_mut()?;
-            let tx = conn
-                .transaction()
-                .map_err(|e| StoreError::Storage(format!("begin todo save: {e}")))?;
-            tx.execute(
-                "INSERT INTO todos (title, category_id, position, parent_id, is_group) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![title, category_id, position, parent_id, is_group],
-            )
-            .map_err(|e| StoreError::Storage(format!("save todo: {e}")))?;
-            let id = tx.last_insert_rowid();
-            tx.execute("UPDATE todos SET done = 0 WHERE id = ?1", params![parent])
-                .map_err(|e| StoreError::Storage(format!("save completion: {e}")))?;
-            tx.commit()
-                .map_err(|e| StoreError::Storage(format!("save todo: {e}")))?;
-            if let Some(g) = self.todos.get_mut(&parent) {
-                g.done = false;
-            }
-            id
-        } else {
-            let conn = self.conn()?;
-            conn.execute(
-                "INSERT INTO todos (title, category_id, position, parent_id, is_group) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![title, category_id, position, parent_id, is_group],
-            )
-            .map_err(|e| StoreError::Storage(format!("save todo: {e}")))?;
-            conn.last_insert_rowid()
-        };
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO todos (title, category_id, position, parent_id) VALUES (?1, ?2, ?3, ?4)",
+            params![title, category_id, position, None::<i64>],
+        )
+        .map_err(|e| StoreError::Storage(format!("save todo: {e}")))?;
+        let id = conn.last_insert_rowid();
         self.todos.insert(
             id,
             Todo {
@@ -498,8 +426,7 @@ impl MemoryDb {
                 done: false,
                 category_id,
                 position,
-                parent_id,
-                is_group,
+                parent_id: None,
             },
         );
         Ok(id)
@@ -646,16 +573,12 @@ impl MemoryDb {
     }
 
     pub fn set_title(&mut self, id: i64, title: &str) -> Result<(), StoreError> {
-        let Some(existing) = self.todos.get(&id) else {
+        if !self.todos.contains_key(&id) {
             return Err(StoreError::TodoNotFound);
-        };
+        }
         let title = title.trim().to_string();
         if title.is_empty() {
-            return Err(StoreError::Validation(if existing.is_group {
-                "enter a sub-category name first".into()
-            } else {
-                "enter a todo first".into()
-            }));
+            return Err(StoreError::Validation("enter a todo first".into()));
         }
         self.conn()?
             .execute(
@@ -675,17 +598,22 @@ impl MemoryDb {
         todos
     }
 
-    /// Top-level todos and sub-categories of a category, in display order.
+    /// Top-level todos of a category, in display order.
     pub fn list_category_todos(&self, category_id: i64) -> Vec<Todo> {
         self.list_siblings(category_id, None)
     }
 
-    /// Todos nested under a sub-category, in display order.
-    pub fn list_subcategory_todos(&self, group_id: i64) -> Vec<Todo> {
-        match self.todos.get(&group_id) {
-            Some(group) => self.list_siblings(group.category_id, Some(group_id)),
+    /// Sub-items nested under a todo, in display order.
+    pub fn list_subtodos(&self, parent_id: i64) -> Vec<Todo> {
+        match self.todos.get(&parent_id) {
+            Some(parent) => self.list_siblings(parent.category_id, Some(parent_id)),
             None => Vec::new(),
         }
+    }
+
+    /// Returns true if the given todo currently has nested sub-items.
+    pub fn has_children(&self, id: i64) -> bool {
+        self.todos.values().any(|t| t.parent_id == Some(id))
     }
 
     fn list_siblings(&self, category_id: i64, parent_id: Option<i64>) -> Vec<Todo> {
@@ -731,14 +659,14 @@ impl MemoryDb {
         Ok(())
     }
 
-    /// Moves a todo (or sub-category) to `index` within a category's top-level list.
+    /// Moves a todo to `index` within a category's top-level list.
     pub fn move_todo(&mut self, id: i64, category_id: i64, index: isize) -> Result<(), StoreError> {
         self.move_todo_to(id, category_id, None, index)
     }
 
-    /// Moves a todo to `index` among the siblings under `parent_id` (a sub-category in
-    /// `category_id`), or among the category's top-level items when `parent_id` is `None`.
-    /// Sub-categories carry their nested todos with them and cannot themselves be nested.
+    /// Moves a todo to `index` among the siblings under `parent_id`, or among the
+    /// category's top-level items when `parent_id` is `None`. Items with sub-items
+    /// carry their sub-items with them and cannot themselves be nested (max depth = 1).
     pub fn move_todo_to(
         &mut self,
         id: i64,
@@ -752,15 +680,32 @@ impl MemoryDb {
         if !self.categories.contains_key(&category_id) {
             return Err(StoreError::CategoryNotFound);
         }
+        let children: Vec<i64> = self
+            .todos
+            .values()
+            .filter(|t| t.parent_id == Some(id))
+            .map(|t| t.id)
+            .collect();
         if let Some(parent) = parent_id {
-            if item.is_group || parent == id {
+            if parent == id {
                 return Err(StoreError::Validation(
-                    "sub-categories cannot be nested".into(),
+                    "a todo cannot be nested under itself".into(),
                 ));
             }
-            if self.group(parent)?.category_id != category_id {
+            if !children.is_empty() {
                 return Err(StoreError::Validation(
-                    "sub-category belongs to another category".into(),
+                    "items with sub-items cannot be nested".into(),
+                ));
+            }
+            let parent_todo = self.todos.get(&parent).ok_or(StoreError::TodoNotFound)?;
+            if parent_todo.parent_id.is_some() {
+                return Err(StoreError::Validation(
+                    "sub-items cannot be nested more than one level deep".into(),
+                ));
+            }
+            if parent_todo.category_id != category_id {
+                return Err(StoreError::Validation(
+                    "parent todo belongs to another category".into(),
                 ));
             }
         }
@@ -772,23 +717,13 @@ impl MemoryDb {
         if index < 0 || (index as usize) > remaining.len() {
             return Err(StoreError::Validation("invalid todo position".into()));
         }
-        let children: Vec<i64> = if item.is_group {
-            self.todos
-                .values()
-                .filter(|t| t.parent_id == Some(id))
-                .map(|t| t.id)
-                .collect()
-        } else {
-            Vec::new()
-        };
         let old_parent = item.parent_id;
-        let is_group = item.is_group;
         item.category_id = category_id;
         item.parent_id = parent_id;
         remaining.insert(index as usize, item);
 
         let mut parent_done_updates: Vec<(i64, bool)> = Vec::new();
-        if !is_group {
+        if children.is_empty() {
             if let Some(p) = parent_id {
                 let all_done = remaining.iter().all(|t| t.done);
                 if self.todos.get(&p).is_some_and(|g| g.done != all_done) {
@@ -859,21 +794,21 @@ impl MemoryDb {
         Ok(())
     }
 
-    /// Sets completion. Toggling a sub-category applies to all of its todos; toggling a
-    /// nested todo checks the sub-category once every sibling is done (and unchecks it
-    /// otherwise).
+    /// Sets completion. Toggling a parent item applies to all of its sub-items; toggling a
+    /// sub-item checks the parent once every sibling is done (and unchecks it otherwise).
     pub fn set_done(&mut self, id: i64, done: bool) -> Result<(), StoreError> {
         let Some(item) = self.todos.get(&id).cloned() else {
             return Err(StoreError::TodoNotFound);
         };
+        let children: Vec<i64> = self
+            .todos
+            .values()
+            .filter(|t| t.parent_id == Some(id))
+            .map(|t| t.id)
+            .collect();
         let mut updates: Vec<(i64, bool)> = vec![(id, done)];
-        if item.is_group {
-            updates.extend(
-                self.todos
-                    .values()
-                    .filter(|t| t.parent_id == Some(id))
-                    .map(|t| (t.id, done)),
-            );
+        if !children.is_empty() {
+            updates.extend(children.into_iter().map(|child_id| (child_id, done)));
         } else if let Some(parent) = item.parent_id {
             let all_done = self
                 .todos
@@ -1212,7 +1147,6 @@ mod tests {
                 category_id: 1,
                 position: 1,
                 parent_id: None,
-                is_group: false,
             }]
         );
         db.set_category_icon(1, "💼").unwrap();
@@ -1284,7 +1218,6 @@ mod tests {
                 category_id: groups[0].id,
                 position: 1,
                 parent_id: None,
-                is_group: false,
             },
             Todo {
                 id: 2,
@@ -1293,7 +1226,6 @@ mod tests {
                 category_id: groups[0].id,
                 position: 2,
                 parent_id: None,
-                is_group: false,
             },
         ];
         assert_eq!(db.list(), expected);
@@ -1502,62 +1434,101 @@ mod tests {
     }
 
     #[test]
-    fn test_subcategories_nest_persist_and_move() {
+    fn test_subitems_nest_persist_and_move() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("todos.sqlite");
         let mut db = MemoryDb::open(&path).unwrap();
         let life = db.add_category("Life").unwrap();
         let work = db.add_category("Work").unwrap();
-        db.add_in_category("Call mom", life).unwrap();
-        let buy = db.add_subcategory("  To buy ", life).unwrap();
-        let milk = db.add_in_subcategory("Milk", buy).unwrap();
-        let eggs = db.add_in_subcategory("Eggs", buy).unwrap();
+        let call = db.add_in_category("Call mom", life).unwrap();
+        let buy = db.add_in_category("  To buy ", life).unwrap();
+        let milk = db.add_in_category("Milk", life).unwrap();
+        let eggs = db.add_in_category("Eggs", life).unwrap();
         let walk = db.add_in_category("Walk", life).unwrap();
 
+        db.move_todo_to(milk, life, Some(buy), 0).unwrap();
+        db.move_todo_to(eggs, life, Some(buy), 1).unwrap();
+
         assert_eq!(titles(&db.list_category_todos(life)), ["Call mom", "To buy", "Walk"]);
-        assert!(db.todo(buy).unwrap().is_group);
-        assert_eq!(titles(&db.list_subcategory_todos(buy)), ["Milk", "Eggs"]);
+        assert!(db.has_children(buy));
+        assert!(!db.has_children(call));
+        assert_eq!(titles(&db.list_subtodos(buy)), ["Milk", "Eggs"]);
         assert_eq!(db.todo(milk).unwrap().parent_id, Some(buy));
 
-        // Invalid nesting
-        assert!(db.add_in_subcategory("Bad", walk).is_err());
-        assert!(db.add_in_subcategory("Bad", 999).is_err());
-        assert!(db.add_in_subcategory("  ", buy).is_err());
-        assert!(db.add_subcategory("", life).is_err());
-        let other = db.add_subcategory("Other", life).unwrap();
-        assert!(db.move_todo_to(other, life, Some(buy), 0).is_err());
+        // Max depth = 1 validations
+        assert!(db.move_todo_to(buy, life, Some(buy), 0).is_err());
+        assert!(db.move_todo_to(walk, life, Some(milk), 0).is_err());
+        assert!(db.move_todo_to(buy, life, Some(call), 0).is_err());
         assert!(db.move_todo_to(walk, work, Some(buy), 0).is_err());
         assert!(db.move_todo_to(walk, life, Some(buy), 5).is_err());
-        db.delete(other).unwrap();
+        assert!(db.move_todo_to(walk, life, Some(999), 0).is_err());
 
-        // Move a top-level todo into the sub-category, then reorder within it
+        // A former parent can be nested once its children are moved out
+        let temp_parent = db.add_in_category("Temp parent", life).unwrap();
+        let temp_child = db.add_in_category("Temp child", life).unwrap();
+        db.move_todo_to(temp_child, life, Some(temp_parent), 0).unwrap();
+        assert!(db.move_todo_to(temp_parent, life, Some(call), 0).is_err());
+        db.move_todo(temp_child, life, 0).unwrap();
+        db.move_todo_to(temp_parent, life, Some(call), 0).unwrap();
+        assert_eq!(titles(&db.list_subtodos(call)), ["Temp parent"]);
+        db.delete(call).unwrap();
+        db.delete(temp_child).unwrap();
+
+        // Move a top-level todo into the parent, then reorder within it
         db.move_todo_to(walk, life, Some(buy), 1).unwrap();
-        assert_eq!(titles(&db.list_subcategory_todos(buy)), ["Milk", "Walk", "Eggs"]);
-        assert_eq!(titles(&db.list_category_todos(life)), ["Call mom", "To buy"]);
+        assert_eq!(titles(&db.list_subtodos(buy)), ["Milk", "Walk", "Eggs"]);
+        assert_eq!(titles(&db.list_category_todos(life)), ["To buy"]);
         // ...and back out to the top level
         db.move_todo(eggs, life, 0).unwrap();
-        assert_eq!(titles(&db.list_category_todos(life)), ["Eggs", "Call mom", "To buy"]);
+        assert_eq!(titles(&db.list_category_todos(life)), ["Eggs", "To buy"]);
         assert_eq!(db.todo(eggs).unwrap().parent_id, None);
 
-        // Moving a sub-category to another category carries its todos
+        // Moving a parent to another category carries its sub-items
         db.move_todo(buy, work, 0).unwrap();
         assert_eq!(titles(&db.list_category_todos(work)), ["To buy"]);
-        assert_eq!(titles(&db.list_subcategory_todos(buy)), ["Milk", "Walk"]);
-        assert!(db.list().iter().filter(|t| t.parent_id == Some(buy)).all(|t| t.category_id == work));
+        assert_eq!(titles(&db.list_subtodos(buy)), ["Milk", "Walk"]);
+        assert!(db
+            .list()
+            .iter()
+            .filter(|t| t.parent_id == Some(buy))
+            .all(|t| t.category_id == work));
 
         let mut reopened = MemoryDb::open(&path).unwrap();
         assert_eq!(reopened.list(), db.list());
         reopened.close().unwrap();
         db.close().unwrap();
+
+        // Legacy SQLite database with an existing `is_group` column opens and inserts cleanly
+        let legacy_path = dir.path().join("legacy_is_group.sqlite");
+        let legacy = Connection::open(&legacy_path).unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE categories (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL COLLATE NOCASE UNIQUE, icon TEXT NOT NULL DEFAULT '', position INTEGER NOT NULL DEFAULT 0, color TEXT NOT NULL DEFAULT '');
+                 CREATE TABLE todos (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0 CHECK (done IN (0, 1)), category_id INTEGER REFERENCES categories(id), position INTEGER NOT NULL DEFAULT 0, parent_id INTEGER REFERENCES todos(id), is_group INTEGER NOT NULL DEFAULT 0 CHECK (is_group IN (0, 1)));
+                 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO categories (id, name, position) VALUES (1, 'Life', 0);
+                 INSERT INTO todos (id, title, done, category_id, position, parent_id, is_group) VALUES (1, 'Group', 0, 1, 0, NULL, 1), (2, 'Child', 0, 1, 0, 1, 0);",
+            )
+            .unwrap();
+        legacy.close().unwrap();
+
+        let mut legacy_db = MemoryDb::open(&legacy_path).unwrap();
+        assert_eq!(titles(&legacy_db.list_category_todos(1)), ["Group"]);
+        assert_eq!(titles(&legacy_db.list_subtodos(1)), ["Child"]);
+        let added = legacy_db.add_in_category("Added", 1).unwrap();
+        assert_eq!(legacy_db.todo(added).unwrap().title, "Added");
+        legacy_db.close().unwrap();
     }
 
     #[test]
-    fn test_subcategory_completion_and_deletion_cascade() {
+    fn test_subitem_completion_and_deletion_cascade() {
         let mut db = MemoryDb::open_in_memory().unwrap();
         let life = db.add_category("Life").unwrap();
-        let buy = db.add_subcategory("To buy", life).unwrap();
-        let milk = db.add_in_subcategory("Milk", buy).unwrap();
-        let eggs = db.add_in_subcategory("Eggs", buy).unwrap();
+        let buy = db.add_in_category("To buy", life).unwrap();
+        let milk = db.add_in_category("Milk", life).unwrap();
+        let eggs = db.add_in_category("Eggs", life).unwrap();
+        db.move_todo_to(milk, life, Some(buy), 0).unwrap();
+        db.move_todo_to(eggs, life, Some(buy), 1).unwrap();
         let keep = db.add_in_category("Keep", life).unwrap();
 
         db.set_done(buy, true).unwrap();
@@ -1590,32 +1561,34 @@ mod tests {
             .unwrap();
         assert_eq!(rows, 1);
 
-        let buy = db.add_subcategory("To buy", life).unwrap();
-        db.add_in_subcategory("Bread", buy).unwrap();
+        let buy = db.add_in_category("To buy", life).unwrap();
+        let bread = db.add_in_category("Bread", life).unwrap();
+        db.move_todo_to(bread, life, Some(buy), 0).unwrap();
 
-        // Adding, moving, or deleting children keeps parent done state synchronized
+        // Moving or deleting sub-items keeps parent done state synchronized
         db.set_done(buy, true).unwrap();
         assert!(db.todo(buy).unwrap().done);
-        let butter = db.add_in_subcategory("Butter", buy).unwrap();
+        let butter = db.add_in_category("Butter", life).unwrap();
+        db.move_todo_to(butter, life, Some(buy), 1).unwrap();
         assert!(!db.todo(buy).unwrap().done);
         // Deleting the only unchecked child checks the parent again
         db.delete(butter).unwrap();
         assert!(db.todo(buy).unwrap().done);
-        // Moving an unchecked top-level todo into a checked sub-category unchecks it
+        // Moving an unchecked top-level todo into a checked parent unchecks it
         let errand = db.add_in_category("Errand", life).unwrap();
         db.move_todo_to(errand, life, Some(buy), 1).unwrap();
         assert!(!db.todo(buy).unwrap().done);
-        // Moving that only unchecked todo out re-checks the sub-category
+        // Moving that only unchecked todo out re-checks the parent
         db.move_todo(errand, life, 0).unwrap();
         assert!(db.todo(buy).unwrap().done);
-        // Deleting the last remaining child leaves the sub-category's done state unchanged
-        let bread = db.list_subcategory_todos(buy)[0].id;
+        // Deleting the last remaining child leaves the parent's done state unchanged
+        let bread = db.list_subtodos(buy)[0].id;
         db.delete(bread).unwrap();
         assert!(db.todo(buy).unwrap().done);
-        // Empty title validation on a sub-category
+        // Empty title validation
         assert!(matches!(
             db.set_title(buy, "   "),
-            Err(StoreError::Validation(msg)) if msg == "enter a sub-category name first"
+            Err(StoreError::Validation(msg)) if msg == "enter a todo first"
         ));
 
         db.delete_category(life).unwrap();

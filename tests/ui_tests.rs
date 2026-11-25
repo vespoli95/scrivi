@@ -4,7 +4,7 @@ use std::rc::Rc;
 use egui::{pos2, vec2, CursorIcon, Event, FontId, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, RawInput, Rect, Vec2};
 use scrivi::layout::{
     compute_category_grid, compute_heading_layout, compute_pinned_category_stack, GRID_GAP,
-    PINNED_WINDOW_HEIGHT, PINNED_WINDOW_WIDTH,
+    PINNED_WINDOW_HEIGHT, PINNED_WINDOW_WIDTH, SUBTODO_INDENT,
 };
 use scrivi::options::WindowPlatform;
 use scrivi::store::{MemoryDb, CATEGORY_EMOJIS};
@@ -1177,15 +1177,9 @@ fn test_layout_stays_within_window_right_edge() {
                 panel.delete_rect.left()
             );
             assert!(
-                panel.todo_input_rect.right() < panel.subcategory_add_rect.left(),
-                "{label} @ {width} cat {cat_id}: todo_input_rect {} overlaps subcategory_add_rect {}",
+                panel.todo_input_rect.right() < panel.todo_add_rect.left(),
+                "{label} @ {width} cat {cat_id}: todo_input_rect {} overlaps todo_add_rect {}",
                 panel.todo_input_rect.right(),
-                panel.subcategory_add_rect.left()
-            );
-            assert!(
-                panel.subcategory_add_rect.right() < panel.todo_add_rect.left(),
-                "{label} @ {width} cat {cat_id}: subcategory_add_rect {} overlaps todo_add_rect {}",
-                panel.subcategory_add_rect.right(),
                 panel.todo_add_rect.left()
             );
             assert!(
@@ -1198,21 +1192,6 @@ fn test_layout_stays_within_window_right_edge() {
                 "{label} @ {width} cat {cat_id}: scroll_rect {} exceeds {inner_right}",
                 panel.scroll_rect.right()
             );
-            if let (Some(child_entry), Some(child_add)) =
-                (panel.child_entry_rect, panel.child_add_rect)
-            {
-                assert!(
-                    child_entry.right() < child_add.left(),
-                    "{label} @ {width} cat {cat_id}: child_entry_rect {} overlaps child_add_rect {}",
-                    child_entry.right(),
-                    child_add.left()
-                );
-                assert!(
-                    child_add.right() <= inner_right + 0.01,
-                    "{label} @ {width} cat {cat_id}: child_add_rect {} exceeds {inner_right}",
-                    child_add.right()
-                );
-            }
 
             for &(todo_id, ref row) in &panel.todo_rows {
                 assert!(
@@ -1231,27 +1210,12 @@ fn test_layout_stays_within_window_right_edge() {
                     row.edit_rect.right(),
                     row.delete_rect.left()
                 );
-                if let Some(add_child) = row.add_child_rect {
-                    assert!(
-                        row.title_rect.right() < add_child.left(),
-                        "{label} @ {width} cat {cat_id} todo {todo_id}: title_rect {} overlaps add_child_rect {}",
-                        row.title_rect.right(),
-                        add_child.left()
-                    );
-                    assert!(
-                        add_child.right() < row.edit_rect.left(),
-                        "{label} @ {width} cat {cat_id} todo {todo_id}: add_child_rect {} overlaps edit_rect {}",
-                        add_child.right(),
-                        row.edit_rect.left()
-                    );
-                } else {
-                    assert!(
-                        row.title_rect.right() < row.edit_rect.left(),
-                        "{label} @ {width} cat {cat_id} todo {todo_id}: title_rect {} overlaps edit_rect {}",
-                        row.title_rect.right(),
-                        row.edit_rect.left()
-                    );
-                }
+                assert!(
+                    row.title_rect.right() < row.edit_rect.left(),
+                    "{label} @ {width} cat {cat_id} todo {todo_id}: title_rect {} overlaps edit_rect {}",
+                    row.title_rect.right(),
+                    row.edit_rect.left()
+                );
             }
         }
     };
@@ -1275,16 +1239,18 @@ fn test_layout_stays_within_window_right_edge() {
             )
             .unwrap();
             let sub_id = db
-                .add_subcategory(
-                    "LongSubCategoryHeadingWithManyWordsThatShouldWrapCleanlyWithoutClipping",
+                .add_in_category(
+                    "LongParentTodoHeadingWithManyWordsThatShouldWrapCleanlyWithoutClipping",
                     id,
                 )
                 .unwrap();
-            db.add_in_subcategory(
-                "IndentedSubTodoItemWithALongDescriptionThatShouldAlsoStayInsideCardWidth",
-                sub_id,
-            )
-            .unwrap();
+            let sub_child_id = db
+                .add_in_category(
+                    "IndentedSubTodoItemWithALongDescriptionThatShouldAlsoStayInsideCardWidth",
+                    id,
+                )
+                .unwrap();
+            db.move_todo_to(sub_child_id, id, Some(sub_id), 0).unwrap();
         }
 
         let mut app = ScriviApp::new(
@@ -1303,12 +1269,6 @@ fn test_layout_stays_within_window_right_edge() {
             draft_input,
             "Line one\nLine two with trailing spaces     ",
         );
-        let add_child = app.snapshot().category_panels[&first_id]
-            .todo_rows
-            .iter()
-            .find_map(|(_, row)| row.add_child_rect)
-            .expect("sub-category add_child_rect missing");
-        h.click(&mut app, add_child.center());
 
         for width in widths {
             h.resize(&mut app, width, 600.0);
@@ -1508,7 +1468,7 @@ fn test_startup_pin_failure_leaves_app_unpinned() {
 }
 
 #[test]
-fn test_subcategory_lifecycle_and_nesting() {
+fn test_subitem_lifecycle_and_nesting() {
     let mut db = MemoryDb::open_in_memory().unwrap();
     let life_id = db.add_category("Life").unwrap();
     let mut app = ScriviApp::new(
@@ -1521,57 +1481,65 @@ fn test_subcategory_lifecycle_and_nesting() {
     let mut h = TestHarness::new(760.0, 600.0);
     pump_unpinned(&mut h, &mut app);
 
+    // Add normal items via the single input (using '+' and Enter)
     let panel = app.snapshot().category_panels[&life_id].clone();
     h.replace_text(&mut app, panel.todo_input_rect, "To buy");
     let panel = app.snapshot().category_panels[&life_id].clone();
-    h.click(&mut app, panel.subcategory_add_rect.center());
+    h.click(&mut app, panel.todo_add_rect.center());
+
+    let panel = app.snapshot().category_panels[&life_id].clone();
+    h.replace_text(&mut app, panel.todo_input_rect, "Milk");
+    h.press_enter(&mut app);
+
+    let panel = app.snapshot().category_panels[&life_id].clone();
+    h.replace_text(&mut app, panel.todo_input_rect, "Eggs");
+    let panel = app.snapshot().category_panels[&life_id].clone();
+    h.click(&mut app, panel.todo_add_rect.center());
 
     let top = app.db().unwrap().list_category_todos(life_id);
-    assert_eq!(top.len(), 1);
-    assert_eq!(top[0].title, "To buy");
-    assert!(top[0].is_group);
+    assert_eq!(top.len(), 3);
     let buy_id = top[0].id;
+    let milk_id = top[1].id;
+    let eggs_id = top[2].id;
     assert_eq!(app.todo_draft(life_id), "");
-    assert_eq!(app.child_entry_open(), Some(buy_id));
-    let panel = app.snapshot().category_panels[&life_id].clone();
-    let child_entry = panel.child_entry_rect.expect("child entry missing");
-    assert!(panel.child_add_rect.is_some());
 
-    // Add indented items via Enter and via inline '+' button
-    h.replace_text(&mut app, child_entry, "Milk");
-    h.press_enter(&mut app);
-    let panel = app.snapshot().category_panels[&life_id].clone();
-    let child_entry = panel.child_entry_rect.unwrap();
-    h.replace_text(&mut app, child_entry, "Eggs");
-    let panel = app.snapshot().category_panels[&life_id].clone();
-    h.click(&mut app, panel.child_add_rect.unwrap().center());
+    // Drag "Milk" onto "To buy" -> becomes an indented sub-item
+    let panel = &app.snapshot().category_panels[&life_id];
+    let milk_handle = panel.todo_rows[1].1.handle_rect.center();
+    let buy_center = panel.todo_rows[0].1.row_rect.center();
+    h.drag(&mut app, milk_handle, buy_center);
 
-    let children = app.db().unwrap().list_subcategory_todos(buy_id);
+    // Drag "Eggs" indented right below "Milk" -> nests under "To buy" as well
+    let panel = &app.snapshot().category_panels[&life_id];
+    let eggs_handle = panel.todo_rows[2].1.handle_rect.center();
+    let milk_rect = panel.todo_rows[1].1.row_rect;
+    let nest_x = panel.scroll_rect.left() + SUBTODO_INDENT + 12.0;
+    h.drag(&mut app, eggs_handle, pos2(nest_x, milk_rect.bottom() + 2.0));
+
+    let children = app.db().unwrap().list_subtodos(buy_id);
     assert_eq!(
         children.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(),
         vec!["Milk", "Eggs"]
     );
-    let milk_id = children[0].id;
-    let eggs_id = children[1].id;
 
     let panel = app.snapshot().category_panels[&life_id].clone();
     assert_eq!(panel.todo_rows.len(), 3);
     let buy_row = &panel.todo_rows[0].1;
     let milk_row = &panel.todo_rows[1].1;
     let eggs_row = &panel.todo_rows[2].1;
-    assert!(buy_row.is_group && buy_row.indent == 0.0);
-    assert!(!milk_row.is_group && milk_row.indent > 0.0 && milk_row.parent_id == Some(buy_id));
-    assert!(!eggs_row.is_group && eggs_row.indent > 0.0 && eggs_row.parent_id == Some(buy_id));
+    assert!(buy_row.has_children && buy_row.indent == 0.0);
+    assert!(!milk_row.has_children && milk_row.indent > 0.0 && milk_row.parent_id == Some(buy_id));
+    assert!(!eggs_row.has_children && eggs_row.indent > 0.0 && eggs_row.parent_id == Some(buy_id));
     assert!(milk_row.handle_rect.left() > buy_row.handle_rect.left());
     assert!(eggs_row.handle_rect.left() > buy_row.handle_rect.left());
 
-    // Check sub-category -> checks all nested todos
+    // Check parent -> checks all nested sub-items
     h.click(&mut app, buy_row.checkbox_rect.center());
     assert!(app.db().unwrap().todo(buy_id).unwrap().done);
     assert!(app.db().unwrap().todo(milk_id).unwrap().done);
     assert!(app.db().unwrap().todo(eggs_id).unwrap().done);
 
-    // Uncheck one child -> unchecks sub-category while sibling stays done; re-check -> re-checks
+    // Uncheck one child -> unchecks parent while sibling stays done; re-check -> re-checks
     let milk_check = app.snapshot().category_panels[&life_id].todo_rows[1]
         .1
         .checkbox_rect;
@@ -1583,26 +1551,23 @@ fn test_subcategory_lifecycle_and_nesting() {
     h.click(&mut app, milk_check.center());
     assert!(app.db().unwrap().todo(buy_id).unwrap().done);
 
-    // Adding a new child to a checked sub-category automatically unchecks it
-    let add_child = app.snapshot().category_panels[&life_id].todo_rows[0]
-        .1
-        .add_child_rect
-        .unwrap();
-    h.click(&mut app, add_child.center());
-    let child_entry = app.snapshot().category_panels[&life_id]
-        .child_entry_rect
-        .unwrap();
-    h.replace_text(&mut app, child_entry, "Bread");
+    // Dragging an unchecked todo into a checked parent automatically unchecks the parent
+    let panel = app.snapshot().category_panels[&life_id].clone();
+    h.replace_text(&mut app, panel.todo_input_rect, "Bread");
     h.press_enter(&mut app);
+    let panel = &app.snapshot().category_panels[&life_id];
+    let bread_handle = panel.todo_rows[3].1.handle_rect.center();
+    let buy_center = panel.todo_rows[0].1.row_rect.center();
+    h.drag(&mut app, bread_handle, buy_center);
     assert!(!app.db().unwrap().todo(buy_id).unwrap().done);
-    assert_eq!(app.db().unwrap().list_subcategory_todos(buy_id).len(), 3);
+    assert_eq!(app.db().unwrap().list_subtodos(buy_id).len(), 3);
 
-    // Edit sub-category via edit button -> "Edit sub-category" modal
+    // Edit parent via edit button -> "Edit todo" modal
     let edit_rect = app.snapshot().category_panels[&life_id].todo_rows[0]
         .1
         .edit_rect;
     h.click(&mut app, edit_rect.center());
-    assert_eq!(app.active_modal_title(), Some("Edit sub-category"));
+    assert_eq!(app.active_modal_title(), Some("Edit todo"));
     let modal_input = app.snapshot().modal_input_rect.unwrap();
     h.replace_text(&mut app, modal_input, "Groceries");
     let save_btn = find_modal_button(&app, "Save");
@@ -1610,42 +1575,21 @@ fn test_subcategory_lifecycle_and_nesting() {
     assert!(app.active_modal_title().is_none());
     assert_eq!(app.db().unwrap().todo(buy_id).unwrap().title, "Groceries");
 
-    // Add a second sub-category below Groceries; its empty child entry opens.
-    // Clicking add-child on Groceries above must switch cleanly without closing.
+    // Add a standalone item "Solo"
     let panel = app.snapshot().category_panels[&life_id].clone();
-    h.replace_text(&mut app, panel.todo_input_rect, "Chores");
-    let panel = app.snapshot().category_panels[&life_id].clone();
-    h.click(&mut app, panel.subcategory_add_rect.center());
-    let chores_id = app
-        .db()
-        .unwrap()
-        .list_category_todos(life_id)
-        .into_iter()
-        .find(|t| t.title == "Chores")
-        .unwrap()
-        .id;
-    assert_eq!(app.child_entry_open(), Some(chores_id));
+    h.replace_text(&mut app, panel.todo_input_rect, "Solo");
+    h.press_enter(&mut app);
 
-    let groceries_add = app.snapshot().category_panels[&life_id].todo_rows[0]
-        .1
-        .add_child_rect
-        .unwrap();
-    h.click(&mut app, groceries_add.center());
-    assert_eq!(app.child_entry_open(), Some(buy_id));
-    assert!(app.snapshot().category_panels[&life_id]
-        .child_entry_rect
-        .is_some());
-
-    // Deleting a non-empty sub-category asks for confirmation; No preserves, Yes deletes all
+    // Deleting a todo with sub-items asks for confirmation; No preserves, Yes deletes all
     let del_groceries = app.snapshot().category_panels[&life_id].todo_rows[0]
         .1
         .delete_rect;
     h.click(&mut app, del_groceries.center());
-    assert_eq!(app.active_modal_title(), Some("Delete sub-category?"));
+    assert_eq!(app.active_modal_title(), Some("Delete todo?"));
     let no_btn = find_modal_button(&app, "No");
     h.click(&mut app, no_btn.center());
     assert!(app.db().unwrap().todo(buy_id).is_some());
-    assert_eq!(app.db().unwrap().list_subcategory_todos(buy_id).len(), 3);
+    assert_eq!(app.db().unwrap().list_subtodos(buy_id).len(), 3);
 
     let del_groceries = app.snapshot().category_panels[&life_id].todo_rows[0]
         .1
@@ -1657,25 +1601,28 @@ fn test_subcategory_lifecycle_and_nesting() {
     assert!(app.db().unwrap().todo(milk_id).is_none());
     assert!(app.db().unwrap().todo(eggs_id).is_none());
 
-    // Deleting an empty sub-category succeeds immediately without confirmation
-    let del_chores = app.snapshot().category_panels[&life_id].todo_rows[0]
+    // Deleting a todo with no sub-items succeeds immediately without confirmation
+    let del_solo = app.snapshot().category_panels[&life_id].todo_rows[0]
         .1
         .delete_rect;
-    h.click(&mut app, del_chores.center());
+    h.click(&mut app, del_solo.center());
     assert!(app.active_modal_title().is_none());
     assert!(app.db().unwrap().list().is_empty());
 }
 
 #[test]
-fn test_drag_subcategories_and_nested_todos() {
+fn test_drag_subitems_depth_and_moves() {
     let mut db = MemoryDb::open_in_memory().unwrap();
     let life_id = db.add_category("Life").unwrap();
     let work_id = db.add_category("Work").unwrap();
-    db.add_in_category("Call mom", life_id).unwrap();
-    let buy_id = db.add_subcategory("To buy", life_id).unwrap();
-    db.add_in_subcategory("Milk", buy_id).unwrap();
-    db.add_in_subcategory("Eggs", buy_id).unwrap();
+    let call_id = db.add_in_category("Call mom", life_id).unwrap();
+    let buy_id = db.add_in_category("To buy", life_id).unwrap();
+    let milk_id = db.add_in_category("Milk", life_id).unwrap();
+    let eggs_id = db.add_in_category("Eggs", life_id).unwrap();
+    db.move_todo_to(milk_id, life_id, Some(buy_id), 0).unwrap();
+    db.move_todo_to(eggs_id, life_id, Some(buy_id), 1).unwrap();
     db.add_in_category("Walk", life_id).unwrap();
+    let extra_id = db.add_in_category("Extra", life_id).unwrap();
 
     let mut app = ScriviApp::new(
         db,
@@ -1687,10 +1634,10 @@ fn test_drag_subcategories_and_nested_todos() {
     let mut h = TestHarness::new(1000.0, 600.0);
     pump_unpinned(&mut h, &mut app);
 
-    let child_titles = |app: &ScriviApp| -> Vec<String> {
+    let child_titles = |app: &ScriviApp, parent_id: i64| -> Vec<String> {
         app.db()
             .unwrap()
-            .list_subcategory_todos(buy_id)
+            .list_subtodos(parent_id)
             .into_iter()
             .map(|t| t.title)
             .collect()
@@ -1704,13 +1651,13 @@ fn test_drag_subcategories_and_nested_todos() {
             .collect()
     };
 
-    // Drag "Walk" onto the middle of "To buy" heading -> nests at end of "To buy"
+    // Drag "Walk" onto the middle of "To buy" -> nests at end of "To buy"
     let panel = &app.snapshot().category_panels[&life_id];
     let walk_handle = panel.todo_rows[4].1.handle_rect.center();
     let buy_center = panel.todo_rows[1].1.row_rect.center();
     h.drag(&mut app, walk_handle, buy_center);
-    assert_eq!(child_titles(&app), vec!["Milk", "Eggs", "Walk"]);
-    assert_eq!(top_titles(&app, life_id), vec!["Call mom", "To buy"]);
+    assert_eq!(child_titles(&app, buy_id), vec!["Milk", "Eggs", "Walk"]);
+    assert_eq!(top_titles(&app, life_id), vec!["Call mom", "To buy", "Extra"]);
 
     // Drag "Walk" above "Milk" inside "To buy"
     let panel = &app.snapshot().category_panels[&life_id];
@@ -1721,7 +1668,51 @@ fn test_drag_subcategories_and_nested_todos() {
         walk_handle,
         pos2(milk_rect.center().x, milk_rect.top() + 2.0),
     );
-    assert_eq!(child_titles(&app), vec!["Walk", "Milk", "Eggs"]);
+    assert_eq!(child_titles(&app, buy_id), vec!["Walk", "Milk", "Eggs"]);
+
+    // Max depth = 1: dragging "Extra" onto sub-item "Milk" inserts as sibling under "To buy" (never depth 2)
+    let panel = &app.snapshot().category_panels[&life_id];
+    let extra_handle = panel.todo_rows[5].1.handle_rect.center();
+    let milk_center = panel.todo_rows[3].1.row_rect.center();
+    h.drag(&mut app, extra_handle, milk_center);
+    assert_eq!(app.db().unwrap().todo(extra_id).unwrap().parent_id, Some(buy_id));
+    assert!(app.db().unwrap().list_subtodos(milk_id).is_empty());
+    assert_eq!(child_titles(&app, buy_id), vec!["Walk", "Milk", "Extra", "Eggs"]);
+
+    // Drag "Extra" back to the bottom of the card (empty area, indented) -> lands at top level
+    let panel = &app.snapshot().category_panels[&life_id];
+    let extra_handle = panel.todo_rows[4].1.handle_rect.center();
+    let empty_bottom = pos2(
+        panel.scroll_rect.left() + SUBTODO_INDENT + 12.0,
+        panel.scroll_rect.bottom() - 8.0,
+    );
+    h.drag(&mut app, extra_handle, empty_bottom);
+    assert_eq!(app.db().unwrap().todo(extra_id).unwrap().parent_id, None);
+    assert_eq!(top_titles(&app, life_id), vec!["Call mom", "To buy", "Extra"]);
+
+    // Max depth = 1: dragging parent "To buy" onto "Call mom"'s middle band reorders at top level without nesting
+    let panel = &app.snapshot().category_panels[&life_id];
+    let buy_handle = panel.todo_rows[1].1.handle_rect.center();
+    let call_rect = panel.todo_rows[0].1.row_rect;
+    h.drag(
+        &mut app,
+        buy_handle,
+        pos2(call_rect.center().x, call_rect.top() + call_rect.height() * 0.4),
+    );
+    assert_eq!(app.db().unwrap().todo(buy_id).unwrap().parent_id, None);
+    assert_eq!(top_titles(&app, life_id), vec!["To buy", "Call mom", "Extra"]);
+
+    // Move "To buy" back after "Call mom" for the remaining checks
+    let panel = &app.snapshot().category_panels[&life_id];
+    let buy_handle = panel.todo_rows[0].1.handle_rect.center();
+    let call_rect = panel.todo_rows[4].1.row_rect;
+    let scroll_left = panel.scroll_rect.left();
+    h.drag(
+        &mut app,
+        buy_handle,
+        pos2(scroll_left + 10.0, call_rect.bottom() - 2.0),
+    );
+    assert_eq!(top_titles(&app, life_id), vec!["Call mom", "To buy", "Extra"]);
 
     // Drag "Milk" above "To buy" -> un-nests to top level before "To buy"
     let panel = &app.snapshot().category_panels[&life_id];
@@ -1733,8 +1724,11 @@ fn test_drag_subcategories_and_nested_todos() {
         milk_handle,
         pos2(scroll_left + 10.0, buy_rect.top() + 2.0),
     );
-    assert_eq!(top_titles(&app, life_id), vec!["Call mom", "Milk", "To buy"]);
-    assert_eq!(child_titles(&app), vec!["Walk", "Eggs"]);
+    assert_eq!(
+        top_titles(&app, life_id),
+        vec!["Call mom", "Milk", "To buy", "Extra"]
+    );
+    assert_eq!(child_titles(&app, buy_id), vec!["Walk", "Eggs"]);
 
     // Drag "Eggs" below "To buy"'s last child, un-indented -> un-nests after "To buy"
     let panel = &app.snapshot().category_panels[&life_id];
@@ -1748,25 +1742,72 @@ fn test_drag_subcategories_and_nested_todos() {
     );
     assert_eq!(
         top_titles(&app, life_id),
-        vec!["Call mom", "Milk", "To buy", "Eggs"]
+        vec!["Call mom", "Milk", "To buy", "Eggs", "Extra"]
     );
-    assert_eq!(child_titles(&app), vec!["Walk"]);
+    assert_eq!(child_titles(&app, buy_id), vec!["Walk"]);
 
-    // Drag "To buy" (with child "Walk") onto empty "Work" card
+    // Once "To buy" has no children left, it can itself be nested under another todo
+    let panel = &app.snapshot().category_panels[&life_id];
+    let walk_handle = panel.todo_rows[3].1.handle_rect.center();
+    let buy_bottom = panel.todo_rows[2].1.row_rect.bottom();
+    let scroll_left = panel.scroll_rect.left();
+    h.drag(
+        &mut app,
+        walk_handle,
+        pos2(scroll_left + 10.0, buy_bottom + 2.0),
+    );
+    assert!(!app.db().unwrap().has_children(buy_id));
+    let panel = &app.snapshot().category_panels[&life_id];
+    let buy_row_idx = panel
+        .todo_rows
+        .iter()
+        .position(|(id, _)| *id == buy_id)
+        .unwrap();
+    let buy_handle = panel.todo_rows[buy_row_idx].1.handle_rect.center();
+    let call_center = panel.todo_rows[0].1.row_rect.center();
+    h.drag(&mut app, buy_handle, call_center);
+    assert_eq!(app.db().unwrap().todo(buy_id).unwrap().parent_id, Some(call_id));
+
+    // Un-nest "To buy" and re-nest "Walk" under "To buy", then move "To buy" onto empty "Work" card
+    let panel = &app.snapshot().category_panels[&life_id];
+    let buy_row_idx = panel
+        .todo_rows
+        .iter()
+        .position(|(id, _)| *id == buy_id)
+        .unwrap();
+    let buy_handle = panel.todo_rows[buy_row_idx].1.handle_rect.center();
+    let first_top = panel.todo_rows[0].1.row_rect.top();
+    let scroll_left = panel.scroll_rect.left();
+    h.drag(
+        &mut app,
+        buy_handle,
+        pos2(scroll_left + 10.0, first_top + 2.0),
+    );
+    let panel = &app.snapshot().category_panels[&life_id];
+    let walk_row_idx = panel
+        .todo_rows
+        .iter()
+        .position(|(id, _)| *id != buy_id && app.db().unwrap().todo(*id).unwrap().title == "Walk")
+        .unwrap();
+    let walk_handle = panel.todo_rows[walk_row_idx].1.handle_rect.center();
+    let buy_center = panel.todo_rows[0].1.row_rect.center();
+    h.drag(&mut app, walk_handle, buy_center);
+    assert_eq!(child_titles(&app, buy_id), vec!["Walk"]);
+
     let life_panel = &app.snapshot().category_panels[&life_id];
     let work_card = app.snapshot().category_panels[&work_id].card_rect;
-    let buy_handle = life_panel.todo_rows[2].1.handle_rect.center();
+    let buy_handle = life_panel.todo_rows[0].1.handle_rect.center();
     h.drag(&mut app, buy_handle, work_card.center());
     assert_eq!(
         top_titles(&app, life_id),
-        vec!["Call mom", "Milk", "Eggs"]
+        vec!["Call mom", "Milk", "Eggs", "Extra"]
     );
     assert_eq!(top_titles(&app, work_id), vec!["To buy"]);
-    assert_eq!(child_titles(&app), vec!["Walk"]);
+    assert_eq!(child_titles(&app, buy_id), vec!["Walk"]);
     let walk = app
         .db()
         .unwrap()
-        .list_subcategory_todos(buy_id)
+        .list_subtodos(buy_id)
         .into_iter()
         .next()
         .unwrap();
