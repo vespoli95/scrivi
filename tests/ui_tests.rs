@@ -8,10 +8,10 @@ use scrivi::layout::{
 };
 use scrivi::options::WindowPlatform;
 use scrivi::store::{MemoryDb, CATEGORY_EMOJIS};
-use scrivi::theme::{palette, DEFAULT_THEME};
+use scrivi::theme::{palette, DEFAULT_THEME, FONT_SIZE_BODY};
 use scrivi::ui::{
     layout_todo_galley, paint_todo_title, pointer_button, render_multiline_submit_entry,
-    todo_checkbox, ScriviApp,
+    todo_checkbox, ScriviApp, MULTILINE_TEXTBOX_MARGIN, SINGLELINE_TEXTBOX_MARGIN,
 };
 
 struct TestHarness {
@@ -1989,5 +1989,93 @@ fn test_category_height_resize_drag_reset_and_persistence() {
     assert_eq!(app.db().unwrap().category(life_id).unwrap().height, None);
     assert!(
         (app.snapshot().category_panels[&life_id].card_rect.height() - initial_height).abs() < 0.5
+    );
+}
+
+#[test]
+fn test_textbox_padding_and_font_size() {
+    let mut db = MemoryDb::open_in_memory().unwrap();
+    let life_id = db.add_category("Life").unwrap();
+    let todo_id = db.add_in_category("Readable todo item", life_id).unwrap();
+
+    let mut app = ScriviApp::new(
+        db,
+        Box::new(MockPlatform {
+            state: Rc::new(RefCell::new(MockPlatformState::default())),
+        }),
+        None,
+    );
+    let mut h = TestHarness::new(760.0, 600.0);
+    pump_unpinned(&mut h, &mut app);
+
+    // Theme applies larger body font size to egui's TextStyle::Body
+    assert_eq!(
+        h.ctx.style().text_styles[&egui::TextStyle::Body].size,
+        FONT_SIZE_BODY
+    );
+
+    // New category single-line textbox reflects larger font + generous padding and aligns with Add button
+    let snap = app.snapshot();
+    let cat_emoji_rect = snap.new_cat_emoji_rect.unwrap();
+    let cat_input_rect = snap.new_cat_input_rect.unwrap();
+    let cat_add_rect = snap.new_cat_add_rect.unwrap();
+    let item_spacing_x = h.ctx.style().spacing.item_spacing.x;
+    let single_row_h = h.ctx.fonts(|f| f.row_height(&FontId::proportional(FONT_SIZE_BODY)));
+    assert!(
+        (cat_input_rect.height() - single_row_h).abs() < 0.5,
+        "new category input height {} != FONT_SIZE_BODY row height {single_row_h}",
+        cat_input_rect.height()
+    );
+    assert!(
+        cat_input_rect.left() - cat_emoji_rect.right() + 0.01
+            >= item_spacing_x + SINGLELINE_TEXTBOX_MARGIN.left as f32,
+        "new category input missing left margin: {} vs {}",
+        cat_input_rect.left() - cat_emoji_rect.right(),
+        item_spacing_x + SINGLELINE_TEXTBOX_MARGIN.left as f32
+    );
+    let cat_outer_h = (cat_input_rect + SINGLELINE_TEXTBOX_MARGIN).height();
+    assert!(
+        cat_add_rect.height() + 0.01 >= cat_outer_h,
+        "Add button ({}) shorter than padded category input ({cat_outer_h})",
+        cat_add_rect.height()
+    );
+
+    // Category multiline todo textbox reflects 2 rows of larger font + multiline padding
+    let panel = &snap.category_panels[&life_id];
+    assert!(
+        panel.todo_input_rect.height() + 0.01 >= 2.0 * single_row_h,
+        "todo input inner height too short: {} < {}",
+        panel.todo_input_rect.height(),
+        2.0 * single_row_h
+    );
+    assert!(
+        panel.todo_input_rect.left() - panel.card_rect.left() + 0.01
+            >= 12.0 + MULTILINE_TEXTBOX_MARGIN.left as f32,
+        "todo input missing left margin: {}",
+        panel.todo_input_rect.left() - panel.card_rect.left()
+    );
+    let min_multiline_outer_h = 2.0 * single_row_h + MULTILINE_TEXTBOX_MARGIN.sum().y;
+    assert!(
+        panel.todo_add_rect.height() + 0.01 >= min_multiline_outer_h,
+        "todo row height ({}) shorter than padded multiline input ({min_multiline_outer_h})",
+        panel.todo_add_rect.height()
+    );
+
+    // Todo title renders at FONT_SIZE_BODY
+    let title_metrics = &snap.title_metrics[&todo_id];
+    let expected_galley_h = h.ctx.fonts(|f| {
+        f.layout_no_wrap(
+            "Readable todo item".into(),
+            FontId::proportional(FONT_SIZE_BODY),
+            egui::Color32::WHITE,
+        )
+        .size()
+        .y
+    });
+    assert!(
+        (title_metrics.required_height - (expected_galley_h + 8.0)).abs() < 0.5,
+        "todo title height {} did not match FONT_SIZE_BODY galley height {}",
+        title_metrics.required_height,
+        expected_galley_h + 8.0
     );
 }

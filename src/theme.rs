@@ -1,6 +1,13 @@
-use egui::{Color32, CornerRadius, Stroke};
+use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle};
 
 pub const DEFAULT_THEME: &str = "Pastel";
+
+pub const FONT_SIZE_SMALL: f32 = 12.0;
+pub const FONT_SIZE_BODY: f32 = 16.0;
+pub const FONT_SIZE_BUTTON: f32 = 15.0;
+pub const FONT_SIZE_HEADING: f32 = 18.0;
+pub const FONT_SIZE_TITLE: f32 = 22.0;
+pub const FONT_SIZE_MONOSPACE: f32 = 15.0;
 
 pub const APP_THEMES: &[&str] = &["Pastel", "Ocean", "Sage", "Rose", "Light"];
 pub const CATEGORY_COLORS: &[&str] = &["Default", "Lavender", "Ocean", "Sage", "Rose", "Amber"];
@@ -215,6 +222,23 @@ pub fn apply_egui_theme(ctx: &egui::Context, theme_name: &str) {
         egui::Theme::Dark
     });
     ctx.set_visuals(visuals);
+    ctx.all_styles_mut(|style| {
+        style
+            .text_styles
+            .insert(TextStyle::Small, FontId::new(FONT_SIZE_SMALL, FontFamily::Proportional));
+        style
+            .text_styles
+            .insert(TextStyle::Body, FontId::new(FONT_SIZE_BODY, FontFamily::Proportional));
+        style
+            .text_styles
+            .insert(TextStyle::Button, FontId::new(FONT_SIZE_BUTTON, FontFamily::Proportional));
+        style
+            .text_styles
+            .insert(TextStyle::Heading, FontId::new(FONT_SIZE_HEADING, FontFamily::Proportional));
+        style
+            .text_styles
+            .insert(TextStyle::Monospace, FontId::new(FONT_SIZE_MONOSPACE, FontFamily::Monospace));
+    });
 }
 
 #[cfg(test)]
@@ -258,6 +282,20 @@ mod tests {
                     "{name} text on {category} category contrast {ratio:.2} is too low"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_apply_egui_theme_sets_font_sizes() {
+        for theme_name in ["Pastel", "Light"] {
+            let ctx = egui::Context::default();
+            apply_egui_theme(&ctx, theme_name);
+            let style = ctx.style();
+            assert_eq!(style.text_styles[&TextStyle::Small].size, FONT_SIZE_SMALL);
+            assert_eq!(style.text_styles[&TextStyle::Body].size, FONT_SIZE_BODY);
+            assert_eq!(style.text_styles[&TextStyle::Button].size, FONT_SIZE_BUTTON);
+            assert_eq!(style.text_styles[&TextStyle::Heading].size, FONT_SIZE_HEADING);
+            assert_eq!(style.text_styles[&TextStyle::Monospace].size, FONT_SIZE_MONOSPACE);
         }
     }
 }

@@ -17,8 +17,12 @@ use crate::options::WindowPlatform;
 use crate::store::{MemoryDb, Todo, CATEGORY_EMOJIS};
 use crate::theme::{
     apply_egui_theme, category_color, palette, APP_THEMES, CATEGORY_COLORS, DEFAULT_THEME,
+    FONT_SIZE_BODY, FONT_SIZE_BUTTON, FONT_SIZE_HEADING, FONT_SIZE_TITLE,
 };
 use crate::updates::{UpdateController, UpdateEvent};
+
+pub const SINGLELINE_TEXTBOX_MARGIN: egui::Margin = egui::Margin::symmetric(14, 12);
+pub const MULTILINE_TEXTBOX_MARGIN: egui::Margin = egui::Margin::symmetric(10, 8);
 
 #[derive(Clone, Debug)]
 pub struct RenderedTitleLine {
@@ -229,7 +233,6 @@ impl ScriviApp {
         platform: Box<dyn WindowPlatform>,
         updates: Option<UpdateController>,
     ) -> Self {
-        let theme = db.app_theme().to_string();
         let pending_startup_pin = platform.supports_pin();
         Self {
             db: Some(db),
@@ -259,7 +262,7 @@ impl ScriviApp {
             modals: Vec::new(),
             next_modal_id: 1,
             updates,
-            theme_applied: theme,
+            theme_applied: String::new(),
             should_close: false,
             last_cursor_icon: CursorIcon::Default,
             snapshot: UiSnapshot::default(),
@@ -306,7 +309,7 @@ impl ScriviApp {
             )],
             next_modal_id: 2,
             updates: None,
-            theme_applied: DEFAULT_THEME.to_string(),
+            theme_applied: String::new(),
             should_close: false,
             last_cursor_icon: CursorIcon::Default,
             snapshot: UiSnapshot::default(),
@@ -824,7 +827,7 @@ impl ScriviApp {
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new("scrivi")
-                        .size(16.0)
+                        .size(FONT_SIZE_HEADING)
                         .strong()
                         .italics()
                         .color(p.foreground),
@@ -841,7 +844,7 @@ impl ScriviApp {
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new("scrivi")
-                        .size(20.0)
+                        .size(FONT_SIZE_TITLE)
                         .strong()
                         .italics()
                         .color(p.foreground),
@@ -871,7 +874,7 @@ impl ScriviApp {
             // Add category row
             ui.horizontal(|ui| {
                 let emoji_resp =
-                    emoji_button(ui, &self.new_category_icon, false, vec2(40.0, 40.0), theme_name);
+                    emoji_button(ui, &self.new_category_icon, false, vec2(44.0, 44.0), theme_name);
                 self.snapshot.new_cat_emoji_rect = Some(emoji_resp.rect);
                 if emoji_resp.clicked() {
                     self.push_modal(Modal::EmojiPicker {
@@ -882,7 +885,7 @@ impl ScriviApp {
 
                 let add_width = icon_text_button_width(ui, "Add category").max(128.0);
                 let spacing = ui.spacing().item_spacing.x;
-                let entry_margin = egui::Margin::symmetric(10, 10);
+                let entry_margin = SINGLELINE_TEXTBOX_MARGIN;
                 let entry_outer_width = (ui.available_width() - add_width - spacing)
                     .max(entry_margin.sum().x + 24.0);
                 let entry_inner_width = (entry_outer_width - entry_margin.sum().x).max(0.0);
@@ -890,6 +893,7 @@ impl ScriviApp {
                 let input_id = Id::new("new_category_name_input");
                 let output = TextEdit::singleline(&mut self.new_category_name)
                     .id(input_id)
+                    .font(FontId::proportional(FONT_SIZE_BODY))
                     .hint_text("Category name (Life, Money, Work...)")
                     .desired_width(entry_inner_width)
                     .margin(entry_margin)
@@ -904,10 +908,11 @@ impl ScriviApp {
                 let submitted = output.response.lost_focus()
                     && ui.input(|i| i.key_pressed(Key::Enter));
 
+                let add_height = (output.response.rect + entry_margin).height().max(44.0);
                 let add_resp = icon_text_button_sized(
                     ui,
                     "Add category",
-                    vec2(add_width, 40.0),
+                    vec2(add_width, add_height),
                     ButtonImportance::High,
                     theme_name,
                     icons::paint_plus,
@@ -1144,7 +1149,7 @@ impl ScriviApp {
             pos2(heading_left, header_rect.top()),
             pos2(heading_right, header_rect.bottom()),
         );
-        let heading_font = FontId::proportional(16.0);
+        let heading_font = FontId::proportional(FONT_SIZE_HEADING);
         let name_galley = card_ui.fonts(|f| {
             f.layout_no_wrap(group.name.clone(), heading_font.clone(), p.foreground)
         });
@@ -1496,7 +1501,7 @@ impl ScriviApp {
         let wrap_width = (title_width - inner_pad_x * 2.0).max(1.0);
 
         let ink = if item.done { p.muted } else { p.foreground };
-        let font_id = FontId::proportional(14.0);
+        let font_id = FontId::proportional(FONT_SIZE_BODY);
         let galley = layout_todo_galley(ui, &item.title, wrap_width, font_id, ink);
         let required_title_height = galley.size().y + inner_pad_y * 2.0;
         let row_height = handle_side
@@ -1820,7 +1825,7 @@ impl ScriviApp {
                 ui.horizontal(|ui| {
                     let (icon_rect, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
                     icons::paint_error_badge(ui, icon_rect, Color32::from_rgb(225, 85, 95));
-                    ui.label(RichText::new("Error").size(16.0).strong().color(p.foreground));
+                    ui.label(RichText::new("Error").size(FONT_SIZE_HEADING).strong().color(p.foreground));
                 });
                 ui.add_space(8.0);
                 ui.add(
@@ -1850,7 +1855,7 @@ impl ScriviApp {
                     self.snapshot.modal_title = Some(title.clone());
                     self.snapshot.modal_message = Some(message.clone());
                 }
-                ui.label(RichText::new(title.as_str()).size(16.0).strong().color(p.foreground));
+                ui.label(RichText::new(title.as_str()).size(FONT_SIZE_HEADING).strong().color(p.foreground));
                 ui.add_space(8.0);
                 ui.add(
                     egui::Label::new(RichText::new(message.as_str()).color(p.foreground)).wrap(),
@@ -1877,7 +1882,7 @@ impl ScriviApp {
                 }
                 ui.label(
                     RichText::new("Category emoji")
-                        .size(16.0)
+                        .size(FONT_SIZE_HEADING)
                         .strong()
                         .color(p.foreground),
                 );
@@ -1949,7 +1954,7 @@ impl ScriviApp {
                 }
                 ui.label(
                     RichText::new("Category color")
-                        .size(16.0)
+                        .size(FONT_SIZE_HEADING)
                         .strong()
                         .color(p.foreground),
                 );
@@ -1965,7 +1970,7 @@ impl ScriviApp {
                                 ButtonImportance::Medium
                             };
                             let resp =
-                                text_button_sized(ui, name, vec2(120.0, 34.0), importance, theme_name);
+                                text_button_sized(ui, name, vec2(124.0, 36.0), importance, theme_name);
                             if is_top {
                                 self.snapshot
                                     .modal_buttons
@@ -2008,7 +2013,7 @@ impl ScriviApp {
                 }
                 ui.label(
                     RichText::new("Edit todo")
-                        .size(16.0)
+                        .size(FONT_SIZE_HEADING)
                         .strong()
                         .color(p.foreground),
                 );
@@ -2061,7 +2066,7 @@ impl ScriviApp {
                 }
                 ui.label(
                     RichText::new("Settings")
-                        .size(16.0)
+                        .size(FONT_SIZE_HEADING)
                         .strong()
                         .color(p.foreground),
                 );
@@ -2073,7 +2078,7 @@ impl ScriviApp {
                 let combo_resp = text_button_sized(
                     ui,
                     &format!("{current_theme}  ▾"),
-                    vec2(220.0, 32.0),
+                    vec2(220.0, 36.0),
                     ButtonImportance::Medium,
                     theme_name,
                 );
@@ -2101,7 +2106,7 @@ impl ScriviApp {
                                 let r = text_button_sized(
                                     ui,
                                     opt,
-                                    vec2(208.0, 28.0),
+                                    vec2(208.0, 32.0),
                                     imp,
                                     theme_name,
                                 );
@@ -2183,7 +2188,7 @@ impl ScriviApp {
                 }
                 ui.label(
                     RichText::new("Downloading update")
-                        .size(16.0)
+                        .size(FONT_SIZE_HEADING)
                         .strong()
                         .color(p.foreground),
                 );
@@ -2356,9 +2361,10 @@ pub fn render_multiline_submit_entry(
     focus_now: bool,
 ) -> (Response, bool) {
     let shift_enter = KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter);
-    let margin = egui::Margin::symmetric(4, 2);
+    let margin = MULTILINE_TEXTBOX_MARGIN;
     let output = TextEdit::multiline(text)
         .id(id)
+        .font(FontId::proportional(FONT_SIZE_BODY))
         .hint_text(hint)
         .margin(margin)
         .desired_width((width - margin.sum().x).max(0.0))
@@ -2648,7 +2654,7 @@ fn text_button_impl(
     enabled: bool,
     theme_name: &str,
 ) -> Response {
-    let font_id = FontId::proportional(14.0);
+    let font_id = FontId::proportional(FONT_SIZE_BUTTON);
     let galley = ui.fonts(|f| f.layout_no_wrap(text.to_string(), font_id, Color32::WHITE));
     let desired = explicit_size.unwrap_or_else(|| {
         vec2((galley.size().x + 24.0).max(64.0), (galley.size().y + 14.0).max(32.0))
@@ -2664,7 +2670,7 @@ fn text_button_impl(
     ui.painter()
         .rect(rect, CornerRadius::same(6), bg, stroke, egui::StrokeKind::Middle);
     let colored_galley = ui.fonts(|f| {
-        f.layout_no_wrap(text.to_string(), FontId::proportional(14.0), fg)
+        f.layout_no_wrap(text.to_string(), FontId::proportional(FONT_SIZE_BUTTON), fg)
     });
     let text_pos = rect.center() - colored_galley.size() * 0.5;
     ui.painter().galley(text_pos, colored_galley, fg);
@@ -2693,7 +2699,7 @@ fn icon_text_button_sized(
 }
 
 fn icon_text_button_width(ui: &Ui, text: &str) -> f32 {
-    let font_id = FontId::proportional(14.0);
+    let font_id = FontId::proportional(FONT_SIZE_BUTTON);
     let galley = ui.fonts(|f| f.layout_no_wrap(text.to_string(), font_id, Color32::WHITE));
     icon_text_button_width_for_galley(&galley)
 }
@@ -2712,7 +2718,7 @@ fn icon_text_button_impl(
     theme_name: &str,
     paint_icon: impl FnOnce(&Ui, Rect, Color32),
 ) -> Response {
-    let font_id = FontId::proportional(14.0);
+    let font_id = FontId::proportional(FONT_SIZE_BUTTON);
     let galley = ui.fonts(|f| f.layout_no_wrap(text.to_string(), font_id, Color32::WHITE));
     let icon_side = 16.0;
     let gap = 6.0;
@@ -2737,7 +2743,7 @@ fn icon_text_button_impl(
     paint_icon(ui, icon_rect, fg);
 
     let colored_galley = ui.fonts(|f| {
-        f.layout_no_wrap(text.to_string(), FontId::proportional(14.0), fg)
+        f.layout_no_wrap(text.to_string(), FontId::proportional(FONT_SIZE_BUTTON), fg)
     });
     let text_pos = pos2(
         icon_rect.right() + gap,
