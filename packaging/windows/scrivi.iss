@@ -25,7 +25,10 @@ Name: desktopicon; Description: "Create a desktop shortcut"
 
 [Files]
 Source: "{#ExecutablePath}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#IconPath}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#IconPath}"; DestDir: "{app}"; DestName: "scrivi.ico"; Flags: ignoreversion
+
+[InstallDelete]
+Type: files; Name: "{app}\icon.ico"
 
 [Icons]
 Name: "{group}\scrivi"; Filename: "{app}\scrivi.exe"; IconFilename: "{app}\scrivi.ico"

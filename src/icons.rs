@@ -302,8 +302,37 @@ mod tests {
     #[test]
     fn test_load_app_icon() {
         let icon = load_app_icon().expect("assets/icon.ico should decode");
-        assert_eq!(icon.width, 64);
-        assert_eq!(icon.height, 64);
-        assert_eq!(icon.rgba.len(), 64 * 64 * 4);
+        assert_eq!(icon.width, 256);
+        assert_eq!(icon.height, 256);
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+    }
+
+    #[test]
+    fn test_app_icon_ico_has_multi_resolution_frames() {
+        let bytes = include_bytes!("../assets/icon.ico");
+        assert!(bytes.len() >= 6);
+        assert_eq!(&bytes[0..4], &[0, 0, 1, 0]);
+        let count = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
+        assert!(bytes.len() >= 6 + count * 16);
+
+        let mut sizes = Vec::with_capacity(count);
+        for idx in 0..count {
+            let entry = &bytes[6 + idx * 16..6 + (idx + 1) * 16];
+            let width = if entry[0] == 0 { 256 } else { u16::from(entry[0]) };
+            let height = if entry[1] == 0 { 256 } else { u16::from(entry[1]) };
+            assert_eq!(width, height);
+            let data_size = u32::from_le_bytes([entry[8], entry[9], entry[10], entry[11]]) as usize;
+            let data_offset =
+                u32::from_le_bytes([entry[12], entry[13], entry[14], entry[15]]) as usize;
+            assert!(data_offset + data_size <= bytes.len());
+            sizes.push(width);
+        }
+
+        for expected in [16, 24, 32, 48, 64, 256] {
+            assert!(
+                sizes.contains(&expected),
+                "missing {expected}x{expected} frame in assets/icon.ico: {sizes:?}"
+            );
+        }
     }
 }

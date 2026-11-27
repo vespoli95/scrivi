@@ -209,15 +209,17 @@ mod windows_impl {
     use std::ptr;
 
     use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HWND, POINT, RECT};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::System::Registry::{
         RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW,
         RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_EXPAND_SZ,
         REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowPlacement, IsZoomed, SetWindowPlacement, SetWindowPos, ShowWindow,
-        SystemParametersInfoW, SPI_GETWORKAREA, SW_RESTORE, SW_SHOWMAXIMIZED, SW_SHOWNORMAL,
-        WINDOWPLACEMENT,
+        GetSystemMetrics, GetWindowPlacement, IsZoomed, LoadImageW, SendMessageW,
+        SetWindowPlacement, SetWindowPos, ShowWindow, SystemParametersInfoW, ICON_BIG, ICON_SMALL,
+        IMAGE_ICON, LR_SHARED, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SPI_GETWORKAREA,
+        SW_RESTORE, SW_SHOWMAXIMIZED, SW_SHOWNORMAL, WINDOWPLACEMENT, WM_SETICON,
     };
 
     use super::{
@@ -241,9 +243,42 @@ mod windows_impl {
 
     impl WindowsPlatform {
         pub fn new(hwnd: isize) -> Self {
+            apply_window_icon(hwnd);
             Self {
                 hwnd,
                 saved_window: None,
+            }
+        }
+    }
+
+    fn apply_window_icon(hwnd: isize) {
+        if hwnd == 0 {
+            return;
+        }
+        // Resource ID 1 matches the default icon embedded by winresource in build.rs.
+        const APP_ICON_RESOURCE: *const u16 = 1usize as *const u16;
+        unsafe {
+            let instance = GetModuleHandleW(ptr::null());
+            if instance.is_null() {
+                return;
+            }
+            for (icon_slot, metric_w, metric_h) in [
+                (ICON_BIG as usize, SM_CXICON, SM_CYICON),
+                (ICON_SMALL as usize, SM_CXSMICON, SM_CYSMICON),
+            ] {
+                let width = GetSystemMetrics(metric_w);
+                let height = GetSystemMetrics(metric_h);
+                let icon = LoadImageW(
+                    instance,
+                    APP_ICON_RESOURCE,
+                    IMAGE_ICON,
+                    width,
+                    height,
+                    LR_SHARED,
+                );
+                if !icon.is_null() {
+                    SendMessageW(hwnd as HWND, WM_SETICON, icon_slot, icon as isize);
+                }
             }
         }
     }
