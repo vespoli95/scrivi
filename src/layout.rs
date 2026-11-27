@@ -2,6 +2,7 @@ use egui::{pos2, vec2, Pos2, Rect, Vec2};
 
 pub const CELL_MIN_WIDTH: f32 = 340.0;
 pub const CELL_MIN_HEIGHT: f32 = 240.0;
+pub const CELL_MAX_HEIGHT: f32 = 2000.0;
 pub const GRID_GAP: f32 = 12.0;
 pub const DEFAULT_WINDOW_WIDTH: f32 = 760.0;
 pub const DEFAULT_WINDOW_HEIGHT: f32 = 600.0;
@@ -25,40 +26,59 @@ pub fn compute_category_grid(
     cell_min_size: Vec2,
     gap: f32,
 ) -> CategoryGridLayout {
+    compute_category_grid_with_heights(&vec![None; count], avail_size, cell_min_size, gap)
+}
+
+/// Computes responsive grid positions for category cards while honoring optional per-card
+/// height overrides. Each row advances vertically by the tallest card in that row.
+pub fn compute_category_grid_with_heights(
+    custom_heights: &[Option<f32>],
+    avail_size: Vec2,
+    cell_min_size: Vec2,
+    gap: f32,
+) -> CategoryGridLayout {
+    let count = custom_heights.len();
     let columns = (((avail_size.x + gap) / (cell_min_size.x + gap)).floor() as isize).max(1) as usize;
     let rows = if count == 0 {
         1
     } else {
         count.div_ceil(columns)
     };
-    let mut cell_height = cell_min_size.y;
+    let mut default_cell_height = cell_min_size.y;
     if count > 0 {
         let stretched = (avail_size.y - (rows as f32 - 1.0) * gap) / (rows as f32);
-        cell_height = cell_height.max(stretched);
+        default_cell_height = default_cell_height.max(stretched);
     }
     let min_height = (rows as f32) * cell_min_size.y + (rows as f32 - 1.0) * gap;
+    let max_height = CELL_MAX_HEIGHT.max(cell_min_size.y);
     let mut rects = Vec::with_capacity(count);
     let mut max_bottom = 0.0_f32;
 
     let mut start = 0;
+    let mut y = 0.0_f32;
     while start < count {
         let row_count = (count - start).min(columns);
         let width = ((avail_size.x - (row_count as f32 - 1.0) * gap) / (row_count as f32)).max(0.0);
-        let row_index = start / columns;
-        let y = (row_index as f32) * (cell_height + gap);
+        let mut row_height = 0.0_f32;
         for col in 0..row_count {
+            let h = match custom_heights[start + col] {
+                Some(custom) if custom.is_finite() => custom.clamp(cell_min_size.y, max_height),
+                _ => default_cell_height,
+            };
+            row_height = row_height.max(h);
             let x = (col as f32) * (width + gap);
-            let rect = Rect::from_min_size(pos2(x, y), vec2(width, cell_height));
+            let rect = Rect::from_min_size(pos2(x, y), vec2(width, h));
             max_bottom = max_bottom.max(rect.bottom());
             rects.push(rect);
         }
+        y += row_height + gap;
         start += columns;
     }
 
     CategoryGridLayout {
         columns,
         rows,
-        cell_height,
+        cell_height: default_cell_height,
         content_height: min_height.max(max_bottom),
         rects,
     }
@@ -316,5 +336,60 @@ mod tests {
         assert_eq!(compute_nested_todo_drop(&with_other, 5, true, pos2(40.0, 34.0), nest_x), target(None, 2));
         // Empty list
         assert_eq!(compute_nested_todo_drop(&[], 9, false, pos2(0.0, 0.0), nest_x), target(None, 0));
+    }
+
+    #[test]
+    fn test_category_grid_with_custom_heights() {
+        let avail = vec2(760.0, 600.0);
+        let min_size = vec2(CELL_MIN_WIDTH, CELL_MIN_HEIGHT);
+
+        // All None heights match compute_category_grid exactly
+        for count in [0, 1, 2, 3, 4, 5] {
+            assert_eq!(
+                compute_category_grid_with_heights(&vec![None; count], avail, min_size, GRID_GAP),
+                compute_category_grid(count, avail, min_size, GRID_GAP)
+            );
+        }
+
+        // Extending one card in a 2-column row pushes the next row below max row height + gap
+        let grid = compute_category_grid_with_heights(
+            &[Some(420.0), None, Some(300.0), None],
+            avail,
+            min_size,
+            GRID_GAP,
+        );
+        assert_eq!(grid.columns, 2);
+        assert_eq!(grid.rects.len(), 4);
+        assert!((grid.rects[0].height() - 420.0).abs() < 0.01);
+        assert!((grid.rects[1].height() - grid.cell_height).abs() < 0.01);
+        assert!((grid.rects[2].top() - (420.0 + GRID_GAP)).abs() < 0.01);
+        assert!((grid.rects[3].top() - (420.0 + GRID_GAP)).abs() < 0.01);
+        assert!((grid.rects[2].height() - 300.0).abs() < 0.01);
+        assert!((grid.rects[3].height() - grid.cell_height).abs() < 0.01);
+        assert!((grid.content_height - (420.0 + GRID_GAP + 300.0)).abs() < 0.01);
+
+        // Single-column variable heights stack cleanly and update content_height
+        let single_col = compute_category_grid_with_heights(
+            &[Some(360.0), Some(280.0)],
+            vec2(380.0, 500.0),
+            min_size,
+            GRID_GAP,
+        );
+        assert_eq!(single_col.columns, 1);
+        assert!((single_col.rects[0].height() - 360.0).abs() < 0.01);
+        assert!((single_col.rects[1].top() - (360.0 + GRID_GAP)).abs() < 0.01);
+        assert!((single_col.rects[1].height() - 280.0).abs() < 0.01);
+        assert!((single_col.content_height - (360.0 + GRID_GAP + 280.0)).abs() < 0.01);
+
+        // Out-of-range and non-finite heights clamp or fall back safely
+        let clamped = compute_category_grid_with_heights(
+            &[Some(50.0), Some(9999.0), Some(f32::NAN)],
+            vec2(1200.0, 600.0),
+            min_size,
+            GRID_GAP,
+        );
+        assert!((clamped.rects[0].height() - CELL_MIN_HEIGHT).abs() < 0.01);
+        assert!((clamped.rects[1].height() - CELL_MAX_HEIGHT).abs() < 0.01);
+        assert!((clamped.rects[2].height() - clamped.cell_height).abs() < 0.01);
     }
 }

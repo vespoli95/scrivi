@@ -5,6 +5,7 @@ use std::path::Path;
 use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 
+use crate::layout::{CELL_MAX_HEIGHT, CELL_MIN_HEIGHT};
 use crate::theme::{valid_app_theme, valid_category_color, DEFAULT_THEME};
 
 pub const CATEGORY_EMOJIS: &[&str] = &[
@@ -15,6 +16,13 @@ pub const CATEGORY_EMOJIS: &[&str] = &[
 
 pub fn valid_category_icon(icon: &str) -> bool {
     icon.is_empty() || CATEGORY_EMOJIS.contains(&icon)
+}
+
+pub fn valid_category_height(height: Option<i64>) -> bool {
+    match height {
+        None => true,
+        Some(h) => (CELL_MIN_HEIGHT as i64..=CELL_MAX_HEIGHT as i64).contains(&h),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,6 +44,7 @@ pub struct Category {
     pub icon: String,
     pub color: String,
     pub position: i64,
+    pub height: Option<i64>,
 }
 
 #[derive(Debug, Error)]
@@ -157,6 +166,7 @@ impl MemoryDb {
         self.migrate_category_icons()?;
         self.migrate_appearance_and_order()?;
         self.migrate_subcategories()?;
+        self.migrate_category_height()?;
         self.recover_uncategorized()?;
         self.load_categories()?;
 
@@ -293,6 +303,15 @@ impl MemoryDb {
         Ok(())
     }
 
+    fn migrate_category_height(&self) -> Result<(), StoreError> {
+        let conn = self.conn()?;
+        if !Self::table_has_column(conn, "categories", "height")? {
+            conn.execute_batch("ALTER TABLE categories ADD COLUMN height INTEGER")
+                .map_err(|e| StoreError::Storage(format!("migrate category height: {e}")))?;
+        }
+        Ok(())
+    }
+
     fn recover_uncategorized(&mut self) -> Result<(), StoreError> {
         let conn = self.conn_mut()?;
         let count: i64 = conn
@@ -349,7 +368,7 @@ impl MemoryDb {
         let loaded = {
             let conn = self.conn()?;
             let mut stmt = conn
-                .prepare("SELECT id, name, icon, color, position FROM categories")
+                .prepare("SELECT id, name, icon, color, position, height FROM categories")
                 .map_err(|e| StoreError::Storage(format!("load categories: {e}")))?;
             let rows = stmt
                 .query_map([], |row| {
@@ -359,6 +378,7 @@ impl MemoryDb {
                         icon: row.get(2)?,
                         color: row.get(3)?,
                         position: row.get(4)?,
+                        height: row.get(5)?,
                     })
                 })
                 .map_err(|e| StoreError::Storage(format!("load categories: {e}")))?;
@@ -370,6 +390,12 @@ impl MemoryDb {
                     return Err(StoreError::Storage(format!(
                         "read category {}: unknown color {:?}",
                         item.id, item.color
+                    )));
+                }
+                if !valid_category_height(item.height) {
+                    return Err(StoreError::Storage(format!(
+                        "read category {}: invalid height {:?}",
+                        item.id, item.height
                     )));
                 }
                 items.push(item);
@@ -480,6 +506,7 @@ impl MemoryDb {
                 icon: icon.to_string(),
                 color: String::new(),
                 position,
+                height: None,
             },
         );
         Ok(id)
@@ -523,6 +550,28 @@ impl MemoryDb {
             .map_err(|e| StoreError::Storage(format!("save category color: {e}")))?;
         if let Some(item) = self.categories.get_mut(&id) {
             item.color = color.to_string();
+        }
+        Ok(())
+    }
+
+    pub fn set_category_height(&mut self, id: i64, height: Option<i64>) -> Result<(), StoreError> {
+        if !self.categories.contains_key(&id) {
+            return Err(StoreError::CategoryNotFound);
+        }
+        if !valid_category_height(height) {
+            return Err(StoreError::Validation(format!(
+                "category height must be between {} and {} pixels",
+                CELL_MIN_HEIGHT as i64, CELL_MAX_HEIGHT as i64
+            )));
+        }
+        self.conn()?
+            .execute(
+                "UPDATE categories SET height = ?1 WHERE id = ?2",
+                params![height, id],
+            )
+            .map_err(|e| StoreError::Storage(format!("save category height: {e}")))?;
+        if let Some(item) = self.categories.get_mut(&id) {
+            item.height = height;
         }
         Ok(())
     }
@@ -1136,6 +1185,7 @@ mod tests {
                 icon: String::new(),
                 color: String::new(),
                 position: 1,
+                height: None,
             }
         );
         assert_eq!(
@@ -1593,5 +1643,51 @@ mod tests {
 
         db.delete_category(life).unwrap();
         assert!(db.list().is_empty());
+    }
+
+    #[test]
+    fn test_category_height_persists_and_preserves_cache_on_failure() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("todos.sqlite");
+        let mut db = MemoryDb::open(&path).unwrap();
+        let id = db.add_category("Life").unwrap();
+        assert_eq!(db.category(id).unwrap().height, None);
+
+        let check_persisted = |db: &MemoryDb, expected: Option<i64>| {
+            let mut reopened = MemoryDb::open(&path).unwrap();
+            assert_eq!(db.category(id).unwrap().height, expected);
+            assert_eq!(reopened.category(id).unwrap().height, expected);
+            reopened.close().unwrap();
+        };
+
+        db.set_category_height(id, Some(450)).unwrap();
+        check_persisted(&db, Some(450));
+
+        assert!(matches!(
+            db.set_category_height(42, Some(450)),
+            Err(StoreError::CategoryNotFound)
+        ));
+        assert!(matches!(
+            db.set_category_height(id, Some(100)),
+            Err(StoreError::Validation(_))
+        ));
+        assert!(matches!(
+            db.set_category_height(id, Some(2500)),
+            Err(StoreError::Validation(_))
+        ));
+
+        db.exec_sql_for_test(
+            "CREATE TRIGGER prevent_height_update BEFORE UPDATE OF height ON categories
+             BEGIN SELECT RAISE(ABORT, 'update blocked'); END;",
+        )
+        .unwrap();
+        assert!(db.set_category_height(id, Some(520)).is_err());
+        check_persisted(&db, Some(450));
+
+        db.exec_sql_for_test("DROP TRIGGER prevent_height_update;")
+            .unwrap();
+        db.set_category_height(id, None).unwrap();
+        check_persisted(&db, None);
+        db.close().unwrap();
     }
 }

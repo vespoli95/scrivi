@@ -9,9 +9,9 @@ use egui::{
 
 use crate::icons;
 use crate::layout::{
-    compute_category_drop_index, compute_category_grid, compute_heading_layout,
+    compute_category_drop_index, compute_category_grid_with_heights, compute_heading_layout,
     compute_nested_todo_drop, compute_pinned_category_stack, TodoDropRow, TodoDropTarget,
-    CELL_MIN_HEIGHT, CELL_MIN_WIDTH, GRID_GAP, SUBTODO_INDENT,
+    CELL_MAX_HEIGHT, CELL_MIN_HEIGHT, CELL_MIN_WIDTH, GRID_GAP, SUBTODO_INDENT,
 };
 use crate::options::WindowPlatform;
 use crate::store::{MemoryDb, Todo, CATEGORY_EMOJIS};
@@ -61,6 +61,7 @@ pub struct CategoryPanelRects {
     pub todo_add_rect: Rect,
     pub scroll_rect: Rect,
     pub content_height: f32,
+    pub resize_handle_rect: Option<Rect>,
     pub todo_rows: Vec<(i64, TodoRowRects)>,
 }
 
@@ -121,6 +122,16 @@ impl Default for UiSnapshot {
 enum DragPayload {
     Category(i64),
     Todo(i64),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ActiveCategoryResize {
+    category_id: i64,
+    start_pointer_y: f32,
+    start_outer_scroll: f32,
+    start_height: f32,
+    current_height: f32,
+    moved: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,6 +211,8 @@ pub struct ScriviApp {
     active_drag: Option<DragPayload>,
     hovered_category: Option<i64>,
     last_drag_pos: Option<Pos2>,
+    active_resize: Option<ActiveCategoryResize>,
+    last_resize_pos: Option<Pos2>,
     last_auto_scroll: Option<Instant>,
     modals: Vec<(u64, Modal)>,
     next_modal_id: u64,
@@ -240,6 +253,8 @@ impl ScriviApp {
             active_drag: None,
             hovered_category: None,
             last_drag_pos: None,
+            active_resize: None,
+            last_resize_pos: None,
             last_auto_scroll: None,
             modals: Vec::new(),
             next_modal_id: 1,
@@ -279,6 +294,8 @@ impl ScriviApp {
             active_drag: None,
             hovered_category: None,
             last_drag_pos: None,
+            active_resize: None,
+            last_resize_pos: None,
             last_auto_scroll: None,
             modals: vec![(
                 1,
@@ -536,6 +553,89 @@ impl ScriviApp {
         }
     }
 
+    fn handle_resize_state(&mut self, ctx: &egui::Context) {
+        let Some(mut resize) = self.active_resize else {
+            return;
+        };
+
+        if self.pinned || !self.modals.is_empty() {
+            self.active_resize = None;
+            self.last_resize_pos = None;
+            return;
+        }
+
+        let pointer_down = ctx.input(|i| i.pointer.primary_down());
+        let pointer_pos = ctx
+            .input(|i| i.pointer.interact_pos())
+            .or(self.last_resize_pos);
+
+        let update_resize = |resize: &mut ActiveCategoryResize, pos: Pos2, outer_scroll: f32| {
+            let delta_y =
+                (pos.y + outer_scroll) - (resize.start_pointer_y + resize.start_outer_scroll);
+            if delta_y.abs() >= 1.0 {
+                resize.moved = true;
+            }
+            resize.current_height =
+                (resize.start_height + delta_y).clamp(CELL_MIN_HEIGHT, CELL_MAX_HEIGHT);
+        };
+
+        if pointer_down {
+            ctx.set_cursor_icon(CursorIcon::ResizeVertical);
+            if let Some(pos) = pointer_pos {
+                self.last_resize_pos = Some(pos);
+                if self.outer_scroll_rect.is_positive() {
+                    let max_outer =
+                        (self.outer_content_height - self.outer_scroll_rect.height()).max(0.0);
+                    let now = Instant::now();
+                    let should_tick = self
+                        .last_auto_scroll
+                        .is_none_or(|prev| now.duration_since(prev) >= Duration::from_millis(60));
+                    if should_tick {
+                        if pos.y < self.outer_scroll_rect.top() + 24.0 {
+                            self.outer_scroll_offset =
+                                (self.outer_scroll_offset - 12.0).clamp(0.0, max_outer);
+                            self.last_auto_scroll = Some(now);
+                        } else if pos.y > self.outer_scroll_rect.bottom() - 24.0 {
+                            self.outer_scroll_offset =
+                                (self.outer_scroll_offset + 12.0).clamp(0.0, max_outer);
+                            self.last_auto_scroll = Some(now);
+                        }
+                    }
+                    if pos.y < self.outer_scroll_rect.top() + 24.0
+                        || pos.y > self.outer_scroll_rect.bottom() - 24.0
+                    {
+                        ctx.request_repaint_after(Duration::from_millis(60));
+                    }
+                }
+                update_resize(&mut resize, pos, self.outer_scroll_offset);
+            }
+            self.active_resize = Some(resize);
+            return;
+        }
+
+        // Pointer released: finalize height
+        self.active_resize = None;
+        self.last_auto_scroll = None;
+        let release_pos = pointer_pos.or(self.last_resize_pos);
+        self.last_resize_pos = None;
+
+        if let Some(pos) = release_pos {
+            update_resize(&mut resize, pos, self.outer_scroll_offset);
+        }
+
+        if resize.moved {
+            let saved = resize
+                .current_height
+                .round()
+                .clamp(CELL_MIN_HEIGHT, CELL_MAX_HEIGHT) as i64;
+            if let Some(db) = self.db.as_mut() {
+                if let Err(err) = db.set_category_height(resize.category_id, Some(saved)) {
+                    self.push_error(err.to_string());
+                }
+            }
+        }
+    }
+
     fn drop_category(&mut self, id: i64, point: Pos2) {
         let Some(target_id) = self.category_at_point(point) else {
             return;
@@ -650,6 +750,7 @@ impl ScriviApp {
         // Handle drag update/drop before resetting per-frame geometry or at end?
         // Using previous frame's rects lets drop hit-testing work accurately even on release frame!
         self.handle_drag_state(ctx);
+        self.handle_resize_state(ctx);
 
         self.snapshot = UiSnapshot::default();
         self.category_rects.clear();
@@ -859,6 +960,16 @@ impl ScriviApp {
         let mut pending_actions: Vec<UiAction> = Vec::new();
         let mut grid_columns = self.grid_columns;
         let mut grid_content_height = 0.0_f32;
+        let custom_heights: Vec<Option<f32>> = groups
+            .iter()
+            .map(|g| {
+                if let Some(resize) = self.active_resize.filter(|r| r.category_id == g.id) {
+                    Some(resize.current_height)
+                } else {
+                    g.height.map(|h| h as f32)
+                }
+            })
+            .collect();
 
         let scroll_out = ScrollArea::vertical()
             .id_salt("category_grid_scroll")
@@ -875,8 +986,8 @@ impl ScriviApp {
                         GRID_GAP,
                     )
                 } else {
-                    compute_category_grid(
-                        groups.len(),
+                    compute_category_grid_with_heights(
+                        &custom_heights,
                         vec2(grid_width, avail_rect.height()),
                         vec2(CELL_MIN_WIDTH, CELL_MIN_HEIGHT),
                         GRID_GAP,
@@ -935,7 +1046,10 @@ impl ScriviApp {
     ) -> CategoryPanelRects {
         let p = palette(theme_name);
         let fill = category_color(&group.color, theme_name);
-        let border_stroke = if self.hovered_category == Some(group.id) {
+        let is_resizing = self
+            .active_resize
+            .is_some_and(|r| r.category_id == group.id);
+        let border_stroke = if self.hovered_category == Some(group.id) || is_resizing {
             Stroke::new(2.0_f32, p.primary)
         } else {
             Stroke::new(1.0_f32, p.border)
@@ -943,7 +1057,14 @@ impl ScriviApp {
         ui.painter()
             .rect(card_rect, CornerRadius::same(10), fill, border_stroke, egui::StrokeKind::Inside);
 
-        let inner_rect = card_rect.shrink(12.0);
+        let bottom_inset = if self.pinned { 12.0 } else { 16.0 };
+        let inner_rect = Rect::from_min_max(
+            pos2(card_rect.left() + 12.0, card_rect.top() + 12.0),
+            pos2(
+                (card_rect.right() - 12.0).max(card_rect.left() + 12.0),
+                (card_rect.bottom() - bottom_inset).max(card_rect.top() + 12.0),
+            ),
+        );
         let mut card_ui = ui.new_child(egui::UiBuilder::new().max_rect(inner_rect));
         card_ui.set_clip_rect(ui.clip_rect().intersect(card_rect));
 
@@ -970,7 +1091,7 @@ impl ScriviApp {
             p.muted
         };
         icons::paint_drag_handle(&card_ui, handle_rect, handle_color);
-        if handle_resp.drag_started() {
+        if handle_resp.drag_started() && self.active_resize.is_none() {
             self.active_drag = Some(DragPayload::Category(group.id));
             self.last_drag_pos = handle_resp.interact_pointer_pos();
         }
@@ -1265,6 +1386,74 @@ impl ScriviApp {
         );
         self.todo_row_rects.insert(group.id, row_rects_for_drop);
 
+        let resize_handle_rect = if self.pinned {
+            None
+        } else {
+            let handle_rect = Rect::from_min_max(
+                pos2(card_rect.left() + 12.0, card_rect.bottom() - 14.0),
+                pos2(card_rect.right() - 12.0, card_rect.bottom()),
+            );
+            let resize_resp = ui
+                .interact(
+                    handle_rect,
+                    Id::new(("cat_resize", group.id)),
+                    Sense::click_and_drag(),
+                )
+                .on_hover_cursor(CursorIcon::ResizeVertical)
+                .on_hover_text("Drag to resize height · Double-click to reset");
+            let grip_color = if is_resizing {
+                p.primary
+            } else if resize_resp.hovered() {
+                p.foreground
+            } else {
+                p.border
+            };
+            paint_resize_grip(
+                ui,
+                ui.clip_rect().intersect(card_rect),
+                handle_rect,
+                grip_color,
+            );
+
+            if resize_resp.double_clicked() {
+                if self
+                    .active_resize
+                    .is_some_and(|r| r.category_id == group.id)
+                {
+                    self.active_resize = None;
+                    self.last_resize_pos = None;
+                }
+                actions.push(UiAction::SetCategoryHeight {
+                    id: group.id,
+                    height: None,
+                });
+            } else if resize_resp.drag_started() && self.active_drag.is_none() {
+                let pointer_pos = resize_resp.interact_pointer_pos();
+                let start_pointer_y = ui
+                    .ctx()
+                    .input(|i| i.pointer.press_origin())
+                    .or(pointer_pos)
+                    .map(|pos| pos.y)
+                    .unwrap_or(card_rect.bottom());
+                let start_height = card_rect.height();
+                let delta_y = pointer_pos
+                    .map(|pos| pos.y - start_pointer_y)
+                    .unwrap_or(0.0);
+                let current_height =
+                    (start_height + delta_y).clamp(CELL_MIN_HEIGHT, CELL_MAX_HEIGHT);
+                self.active_resize = Some(ActiveCategoryResize {
+                    category_id: group.id,
+                    start_pointer_y,
+                    start_outer_scroll: self.outer_scroll_offset,
+                    start_height,
+                    current_height,
+                    moved: delta_y.abs() >= 1.0,
+                });
+                self.last_resize_pos = pointer_pos;
+            }
+            Some(handle_rect)
+        };
+
         CategoryPanelRects {
             card_rect,
             handle_rect,
@@ -1277,6 +1466,7 @@ impl ScriviApp {
             todo_add_rect,
             scroll_rect: scroll_avail,
             content_height: inner_scroll_out.content_size.y,
+            resize_handle_rect,
             todo_rows: todo_rows_snapshot,
         }
     }
@@ -1346,7 +1536,7 @@ impl ScriviApp {
             p.muted
         };
         icons::paint_drag_handle(ui, handle_rect, handle_color);
-        if handle_resp.drag_started() {
+        if handle_resp.drag_started() && self.active_resize.is_none() {
             self.active_drag = Some(DragPayload::Todo(item.id));
             self.last_drag_pos = handle_resp.interact_pointer_pos();
         }
@@ -1535,6 +1725,14 @@ impl ScriviApp {
                     ),
                     kind: ConfirmKind::DeleteCategory(id),
                 });
+            }
+            UiAction::SetCategoryHeight { id, height } => {
+                let Some(db) = self.db.as_mut() else {
+                    return;
+                };
+                if let Err(err) = db.set_category_height(id, height) {
+                    self.push_error(err.to_string());
+                }
             }
         }
     }
@@ -2134,6 +2332,7 @@ enum UiAction {
     OpenCategoryEmojiPicker { category_id: i64, selected: String },
     OpenColorPicker { category_id: i64, selected: String },
     ConfirmDeleteCategory { id: i64, name: String },
+    SetCategoryHeight { id: i64, height: Option<i64> },
 }
 
 enum ModalResult {
@@ -2354,6 +2553,16 @@ fn paint_todo_drop_indicator(
             Stroke::new(2.0_f32, color),
         );
     }
+}
+
+fn paint_resize_grip(ui: &Ui, clip_rect: Rect, handle_rect: Rect, color: Color32) {
+    let grip_width = (handle_rect.width() * 0.16)
+        .clamp(28.0, 44.0)
+        .min(handle_rect.width());
+    let grip_rect = Rect::from_center_size(handle_rect.center(), vec2(grip_width, 3.0));
+    ui.painter()
+        .with_clip_rect(clip_rect)
+        .rect_filled(grip_rect, CornerRadius::same(2), color);
 }
 
 fn button_colors(

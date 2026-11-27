@@ -3,8 +3,8 @@ use std::rc::Rc;
 
 use egui::{pos2, vec2, CursorIcon, Event, FontId, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, RawInput, Rect, Vec2};
 use scrivi::layout::{
-    compute_category_grid, compute_heading_layout, compute_pinned_category_stack, GRID_GAP,
-    PINNED_WINDOW_HEIGHT, PINNED_WINDOW_WIDTH, SUBTODO_INDENT,
+    compute_category_grid, compute_heading_layout, compute_pinned_category_stack, CELL_MIN_HEIGHT,
+    GRID_GAP, PINNED_WINDOW_HEIGHT, PINNED_WINDOW_WIDTH, SUBTODO_INDENT,
 };
 use scrivi::options::WindowPlatform;
 use scrivi::store::{MemoryDb, CATEGORY_EMOJIS};
@@ -44,6 +44,10 @@ impl TestHarness {
     fn pump(&mut self, app: &mut ScriviApp) {
         self.step(app, vec![], Modifiers::NONE);
         self.step(app, vec![], Modifiers::NONE);
+    }
+
+    fn advance_time(&mut self, seconds: f64) {
+        self.time += seconds;
     }
 
     fn resize(&mut self, app: &mut ScriviApp, width: f32, height: f32) {
@@ -1192,6 +1196,17 @@ fn test_layout_stays_within_window_right_edge() {
                 "{label} @ {width} cat {cat_id}: scroll_rect {} exceeds {inner_right}",
                 panel.scroll_rect.right()
             );
+            let resize_rect = panel
+                .resize_handle_rect
+                .expect("unpinned category should expose resize_handle_rect");
+            assert!(
+                resize_rect.right() <= inner_right + 0.01
+                    && resize_rect.top() >= panel.scroll_rect.bottom() - 0.01
+                    && resize_rect.bottom() <= panel.card_rect.bottom() + 0.01,
+                "{label} @ {width} cat {cat_id}: resize_handle_rect {resize_rect:?} out of bounds for card {:?} / scroll {:?}",
+                panel.card_rect,
+                panel.scroll_rect
+            );
 
             for &(todo_id, ref row) in &panel.todo_rows {
                 assert!(
@@ -1813,4 +1828,166 @@ fn test_drag_subitems_depth_and_moves() {
         .unwrap();
     assert_eq!(walk.category_id, work_id);
     assert_eq!(walk.parent_id, Some(buy_id));
+}
+
+#[test]
+fn test_category_height_resize_drag_reset_and_persistence() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("todos.sqlite");
+    let mut db = MemoryDb::open(&db_path).unwrap();
+    let life_id = db.add_category("Life").unwrap();
+    let work_id = db.add_category("Work").unwrap();
+    let home_id = db.add_category("Home").unwrap();
+
+    let mut app = ScriviApp::new(
+        db,
+        Box::new(MockPlatform {
+            state: Rc::new(RefCell::new(MockPlatformState::default())),
+        }),
+        None,
+    );
+    let mut h = TestHarness::new(760.0, 600.0);
+    h.pump(&mut app);
+
+    // Pinned mode hides resize handles
+    assert!(app.is_pinned());
+    assert!(app.snapshot().category_panels[&life_id]
+        .resize_handle_rect
+        .is_none());
+
+    // Unpin to enter multi-column grid mode
+    pump_unpinned(&mut h, &mut app);
+    assert!(!app.is_pinned());
+
+    let life_panel = app.snapshot().category_panels[&life_id].clone();
+    let home_panel = app.snapshot().category_panels[&home_id].clone();
+    let initial_height = life_panel.card_rect.height();
+    let initial_outer_height = app.snapshot().outer_content_height;
+    let resize_handle = life_panel
+        .resize_handle_rect
+        .expect("unpinned category should have a bottom resize handle");
+
+    // Hovering the bottom resize handle uses a vertical resize cursor
+    h.hover(&mut app, resize_handle.center());
+    assert_eq!(app.last_cursor_icon(), CursorIcon::ResizeVertical);
+
+    // Dragging the handle downward extends the card, persists in SQLite, and pushes row 2 down
+    let drag_delta = 140.0;
+    h.drag(
+        &mut app,
+        resize_handle.center(),
+        resize_handle.center() + vec2(0.0, drag_delta),
+    );
+    h.pump(&mut app);
+
+    let persisted_height = app
+        .db()
+        .unwrap()
+        .category(life_id)
+        .unwrap()
+        .height
+        .expect("drag resize should persist category height");
+    assert!(
+        (persisted_height as f32 - (initial_height + drag_delta)).abs() <= 2.0,
+        "expected ~{}, got {persisted_height}",
+        initial_height + drag_delta
+    );
+
+    let life_after = app.snapshot().category_panels[&life_id].card_rect;
+    let work_after = app.snapshot().category_panels[&work_id].card_rect;
+    let home_after = app.snapshot().category_panels[&home_id].card_rect;
+    assert!((life_after.height() - persisted_height as f32).abs() < 0.5);
+    assert!((work_after.height() - initial_height).abs() < 0.5);
+    assert!(
+        home_after.top() >= life_after.bottom() + GRID_GAP - 0.5,
+        "row 2 card {:?} overlaps extended row 1 card {:?}",
+        home_after,
+        life_after
+    );
+    assert!(home_after.top() > home_panel.card_rect.top());
+    assert!(app.snapshot().outer_content_height > initial_outer_height);
+
+    // Reopening from disk preserves the custom category height
+    drop(app);
+    let reopened = MemoryDb::open(&db_path).unwrap();
+    assert_eq!(
+        reopened.category(life_id).unwrap().height,
+        Some(persisted_height)
+    );
+    let mut app = ScriviApp::new(
+        reopened,
+        Box::new(MockPlatform {
+            state: Rc::new(RefCell::new(MockPlatformState::default())),
+        }),
+        None,
+    );
+    let mut h2 = TestHarness::new(760.0, 600.0);
+    pump_unpinned(&mut h2, &mut app);
+    assert!(
+        (app.snapshot().category_panels[&life_id].card_rect.height() - persisted_height as f32)
+            .abs()
+            < 0.5
+    );
+
+    // Dragging far upward clamps height to CELL_MIN_HEIGHT
+    let handle = app.snapshot().category_panels[&life_id]
+        .resize_handle_rect
+        .unwrap();
+    h2.drag(&mut app, handle.center(), handle.center() - vec2(0.0, 400.0));
+    h2.pump(&mut app);
+    assert_eq!(
+        app.db().unwrap().category(life_id).unwrap().height,
+        Some(CELL_MIN_HEIGHT as i64)
+    );
+    assert!(
+        (app.snapshot().category_panels[&life_id].card_rect.height() - CELL_MIN_HEIGHT).abs()
+            < 0.5
+    );
+
+    // Extend again so we can test failed reset and successful double-click reset
+    let handle = app.snapshot().category_panels[&life_id]
+        .resize_handle_rect
+        .unwrap();
+    h2.drag(&mut app, handle.center(), handle.center() + vec2(0.0, 110.0));
+    h2.pump(&mut app);
+    let extended_height = app.db().unwrap().category(life_id).unwrap().height.unwrap();
+    assert!(extended_height > CELL_MIN_HEIGHT as i64);
+
+    // Failed DB update surfaces Error modal and preserves previous height
+    app.db()
+        .unwrap()
+        .exec_sql_for_test(
+            "CREATE TRIGGER prevent_height_reset BEFORE UPDATE OF height ON categories
+             BEGIN SELECT RAISE(ABORT, 'height update blocked'); END;",
+        )
+        .unwrap();
+    let handle = app.snapshot().category_panels[&life_id]
+        .resize_handle_rect
+        .unwrap();
+    h2.advance_time(1.0);
+    h2.click(&mut app, handle.center());
+    h2.click(&mut app, handle.center());
+    assert_eq!(app.active_modal_title(), Some("Error"));
+    assert_eq!(
+        app.db().unwrap().category(life_id).unwrap().height,
+        Some(extended_height)
+    );
+    let ok_rect = find_modal_button(&app, "OK");
+    h2.click(&mut app, ok_rect.center());
+    app.db()
+        .unwrap()
+        .exec_sql_for_test("DROP TRIGGER prevent_height_reset;")
+        .unwrap();
+
+    // Double-clicking the handle resets height to None and restores default height
+    let handle = app.snapshot().category_panels[&life_id]
+        .resize_handle_rect
+        .unwrap();
+    h2.advance_time(1.0);
+    h2.click(&mut app, handle.center());
+    h2.click(&mut app, handle.center());
+    assert_eq!(app.db().unwrap().category(life_id).unwrap().height, None);
+    assert!(
+        (app.snapshot().category_panels[&life_id].card_rect.height() - initial_height).abs() < 0.5
+    );
 }

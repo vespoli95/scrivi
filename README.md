@@ -10,7 +10,8 @@ deep). Checking off a parent item toggles all of its sub-items, and dragging a
 sub-item back out returns it to the top level. Use a todo's edit button to change
 its text. Long todos wrap onto multiple lines. Drag the dotted handles to reorder
 categories or todos, or to move a todo (and any sub-items under it) to another
-category.
+category. Drag the grip at the bottom of a category card to resize its height
+(double-click the grip to reset to the default height).
 The palette button changes a category's color; **Settings** changes the app
 theme. These choices and ordering are saved across restarts. Deleting a category
 also deletes its todos after confirmation. Older unassigned todos, if any, are
