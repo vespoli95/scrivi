@@ -256,7 +256,7 @@ mod windows_impl {
             return;
         }
         // Resource ID 1 matches the default icon embedded by winresource in build.rs.
-        const APP_ICON_RESOURCE: *const u16 = 1usize as *const u16;
+        const APP_ICON_RESOURCE: *const u16 = ptr::without_provenance(1);
         unsafe {
             let instance = GetModuleHandleW(ptr::null());
             if instance.is_null() {
